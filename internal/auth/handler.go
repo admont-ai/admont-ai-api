@@ -87,15 +87,54 @@ func (h *Handler) Callback(c *gin.Context) {
 		return
 	}
 
+	refreshToken, err := h.jwt.GenerateRefreshToken(userInfo.Email, provider)
+	if err != nil {
+		log.WithError(err).Error("failed to generate refresh token")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
+		return
+	}
+
 	if frontendRedirect != "" {
 		u, err := url.Parse(frontendRedirect)
 		if err == nil {
 			q := u.Query()
 			q.Set("token", token)
+			q.Set("refresh_token", refreshToken)
 			u.RawQuery = q.Encode()
 			c.Redirect(http.StatusTemporaryRedirect, u.String())
 			return
 		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"token": token, "refresh_token": refreshToken})
+}
+
+// Refresh exchanges a valid refresh token for a new access token.
+func (h *Handler) Refresh(c *gin.Context) {
+	var body struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.RefreshToken == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "refresh_token is required"})
+		return
+	}
+
+	claims, err := h.jwt.ValidateRefreshToken(body.RefreshToken)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired refresh token"})
+		return
+	}
+
+	name := claims.Email
+	if claims.Identity != "" {
+		name = claims.Identity
+	}
+
+	token, err := h.jwt.GenerateToken(claims.Email, name, "", claims.Provider)
+	if err != nil {
+		log.WithError(err).Error("failed to generate JWT from refresh")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
+		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"token": token})

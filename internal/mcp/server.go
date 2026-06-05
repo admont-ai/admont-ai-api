@@ -514,8 +514,12 @@ func (s *Server) oauthToken(c *gin.Context) {
 		return
 	}
 
-	// Verify PKCE
-	if entry.CodeChallengeMethod == "S256" && codeVerifier != "" {
+	// Verify PKCE — require verifier whenever a challenge was issued.
+	if entry.CodeChallengeMethod == "S256" {
+		if codeVerifier == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "code_verifier is required"})
+			return
+		}
 		hash := sha256.Sum256([]byte(codeVerifier))
 		computed := base64.RawURLEncoding.EncodeToString(hash[:])
 		if computed != entry.CodeChallenge {

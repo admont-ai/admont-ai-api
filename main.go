@@ -264,7 +264,11 @@ func main() {
 		log.Info("encryption key loaded from configuration")
 	} else {
 		db.SetEncryptionKey(jwtSecret)
-		log.Info("encryption key derived from jwt_secret")
+		if os.Getenv("GIN_MODE") == "release" {
+			log.Error("SECURITY: ADMONT_ENCRYPTION_KEY not set in release mode — encryption key derived from jwt_secret; set a dedicated encryption key for production")
+		} else {
+			log.Warn("ADMONT_ENCRYPTION_KEY not set — encryption key derived from jwt_secret; set a dedicated key for production")
+		}
 	}
 	db.InitSubStores()
 
@@ -333,7 +337,7 @@ func main() {
 		log.Warn("no auth providers configured — add via POST /admin/auth")
 	}
 
-	jwtService := auth.NewJWTService(jwtSecret, 24*time.Hour)
+	jwtService := auth.NewJWTService(jwtSecret, 1*time.Hour)
 	authHandler := auth.NewHandler(httpRegistry, jwtService)
 
 	// --- Load users and groups from DB ---
@@ -544,6 +548,15 @@ func main() {
 		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
 		AllowCredentials: true,
 	}))
+	r.Use(func(c *gin.Context) {
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("X-Frame-Options", "DENY")
+		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
+		if c.Request.TLS != nil || c.GetHeader("X-Forwarded-Proto") == "https" {
+			c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+		c.Next()
+	})
 
 	fuegogin.Get(engine, r, "/health", func(c fuego.ContextNoBody) (healthResponse, error) {
 		return healthResponse{Status: "ok"}, nil
@@ -553,6 +566,7 @@ func main() {
 	authGroup.GET("/login", authHandler.Login)
 	authGroup.GET("/callback", authHandler.Callback)
 	authGroup.GET("/providers", authHandler.Providers)
+	authGroup.POST("/refresh", authHandler.Refresh)
 
 	// Hydra login/consent flow (only when Hydra is enabled)
 	if cfg.InternalAuth.Enabled {

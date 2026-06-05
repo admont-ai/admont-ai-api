@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"strconv"
@@ -84,6 +86,29 @@ func (rl *loginRateLimiter) cleanupLoop() {
 		}
 		rl.mu.Unlock()
 	}
+}
+
+const csrfCookieName = "_admont_csrf"
+
+func generateCSRFToken() string {
+	b := make([]byte, 32)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+func setCSRFCookie(c *gin.Context) string {
+	token := generateCSRFToken()
+	c.SetCookie(csrfCookieName, token, 600, "/hydra", "", false, true)
+	return token
+}
+
+func validateCSRF(c *gin.Context) bool {
+	cookie, err := c.Cookie(csrfCookieName)
+	if err != nil || cookie == "" {
+		return false
+	}
+	formToken := c.PostForm("csrf_token")
+	return formToken != "" && cookie == formToken
 }
 
 // HydraLoginHandler handles the Hydra login and consent flow.
@@ -199,11 +224,12 @@ func (h *HydraLoginHandler) LoginGet(c *gin.Context) {
 		return
 	}
 
+	csrfToken := setCSRFCookie(c)
 	c.Header("Content-Type", "text/html; charset=utf-8")
 	if len(users) == 0 {
-		c.String(http.StatusOK, signupPage(challenge))
+		c.String(http.StatusOK, signupPage(challenge, csrfToken))
 	} else {
-		c.String(http.StatusOK, loginPage(challenge))
+		c.String(http.StatusOK, loginPage(challenge, csrfToken))
 	}
 }
 
@@ -215,6 +241,12 @@ func (h *HydraLoginHandler) LoginPost(c *gin.Context) {
 	// Handle TOTP verification step.
 	if action == "totp" {
 		h.handleTOTPVerification(c)
+		return
+	}
+
+	if !validateCSRF(c) {
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusForbidden, errorPage("Invalid or missing CSRF token. Please reload and try again."))
 		return
 	}
 
@@ -239,6 +271,12 @@ func (h *HydraLoginHandler) LoginPost(c *gin.Context) {
 	identity := "internal:" + email
 
 	if action == "signup" {
+		if len(password) < 8 {
+			c.Header("Content-Type", "text/html; charset=utf-8")
+			c.String(http.StatusBadRequest, errorPage("Password must be at least 8 characters."))
+			return
+		}
+
 		// Only allow signup if no internal users exist yet.
 		users, err := h.store.Users.ListInternalUsers(ctx)
 		if err != nil {
@@ -629,7 +667,7 @@ const pageStyle = `
   .error { color: #c0392b; text-align: center; }
 `
 
-func signupPage(challenge string) string {
+func signupPage(challenge, csrfToken string) string {
 	return `<!DOCTYPE html>
 <html>
 <head>
@@ -643,7 +681,8 @@ func signupPage(challenge string) string {
   <h1>Create Admin Account</h1>
   <p>No users exist yet. Create the first administrator account.</p>
   <form method="POST">
-    <input type="hidden" name="login_challenge" value="` + challenge + `">
+    <input type="hidden" name="login_challenge" value="` + html.EscapeString(challenge) + `">
+    <input type="hidden" name="csrf_token" value="` + html.EscapeString(csrfToken) + `">
     <input type="hidden" name="action" value="signup">
     <label for="first_name">First Name</label>
     <input type="text" id="first_name" name="first_name" placeholder="First Name" required autofocus>
@@ -660,7 +699,7 @@ func signupPage(challenge string) string {
 </html>`
 }
 
-func loginPage(challenge string) string {
+func loginPage(challenge, csrfToken string) string {
 	return `<!DOCTYPE html>
 <html>
 <head>
@@ -673,7 +712,8 @@ func loginPage(challenge string) string {
 <div class="card">
   <h1>Admont-AI Sign In</h1>
   <form method="POST">
-    <input type="hidden" name="login_challenge" value="` + challenge + `">
+    <input type="hidden" name="login_challenge" value="` + html.EscapeString(challenge) + `">
+    <input type="hidden" name="csrf_token" value="` + html.EscapeString(csrfToken) + `">
     <input type="hidden" name="action" value="login">
     <label for="email">Email</label>
     <input type="email" id="email" name="email" placeholder="you@example.com" required autofocus>
@@ -689,7 +729,7 @@ func loginPage(challenge string) string {
 func totpPage(challenge, pendingToken, errMsg string) string {
 	errorHTML := ""
 	if errMsg != "" {
-		errorHTML = `<p class="error" style="margin-bottom: 1rem;">` + errMsg + `</p>`
+		errorHTML = `<p class="error" style="margin-bottom: 1rem;">` + html.EscapeString(errMsg) + `</p>`
 	}
 	return `<!DOCTYPE html>
 <html>
@@ -720,9 +760,9 @@ func totpPage(challenge, pendingToken, errMsg string) string {
   <p id="otp-description">Enter the 6-digit code from your authenticator app.</p>
   ` + errorHTML + `
   <form id="totpForm" method="POST">
-    <input type="hidden" name="login_challenge" value="` + challenge + `">
+    <input type="hidden" name="login_challenge" value="` + html.EscapeString(challenge) + `">
     <input type="hidden" name="action" value="totp">
-    <input type="hidden" name="pending_token" value="` + pendingToken + `">
+    <input type="hidden" name="pending_token" value="` + html.EscapeString(pendingToken) + `">
     <input type="hidden" id="totp_code" name="totp_code" value="">
 
     <div id="otpSection" class="otp-section">

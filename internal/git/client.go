@@ -47,6 +47,15 @@ func NewGitClient(repoPath string, repoUrl string, username string, authToken st
 	}
 }
 
+// sanitizeGitOutput replaces embedded credentials in git error output with redacted versions.
+func (c *Client) sanitizeGitOutput(output string) string {
+	auth := c.authURL()
+	if auth != c.repoUrl {
+		return strings.ReplaceAll(output, auth, c.repoUrl)
+	}
+	return output
+}
+
 // authURL returns the repo URL with embedded credentials for CLI git.
 func (c *Client) authURL() string {
 	u, err := url.Parse(c.repoUrl)
@@ -74,7 +83,7 @@ func (c *Client) CheckReadAccess() error {
 	cmd := exec.Command("git", "-c", "credential.helper=", "ls-remote", "--exit-code", "--quiet", c.authURL())
 	cmd.Env = noCredentialEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git ls-remote: %s: %w", strings.TrimSpace(string(out)), err)
+		return fmt.Errorf("git ls-remote: %s: %w", c.sanitizeGitOutput(strings.TrimSpace(string(out))), err)
 	}
 	return nil
 }
@@ -85,7 +94,7 @@ func (c *Client) CheckWriteAccess() error {
 	cmd := exec.Command("git", "-C", c.repoPath, "-c", "credential.helper=", "push", "--dry-run", c.authURL())
 	cmd.Env = noCredentialEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git push --dry-run: %s: %w", strings.TrimSpace(string(out)), err)
+		return fmt.Errorf("git push --dry-run: %s: %w", c.sanitizeGitOutput(strings.TrimSpace(string(out))), err)
 	}
 	return nil
 }
@@ -219,7 +228,7 @@ func (c *Client) Pull() error {
 	cmd := exec.Command("git", fetchArgs...)
 	cmd.Env = noCredentialEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git fetch: %s: %w", strings.TrimSpace(string(out)), err)
+		return fmt.Errorf("git fetch: %s: %w", c.sanitizeGitOutput(strings.TrimSpace(string(out))), err)
 	}
 
 	// Force-reset to remote branch, discarding local changes
@@ -374,8 +383,23 @@ func (c *Client) GetFileHistory(filePath string) ([]FileChange, error) {
 	return changes, nil
 }
 
+func isValidCommitRef(ref string) bool {
+	if len(ref) < 1 || len(ref) > 40 {
+		return false
+	}
+	for _, c := range ref {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
 // GetFileAtCommit returns the full content of a file at a specific commit.
 func (c *Client) GetFileAtCommit(commitHash string, filePath string) (string, error) {
+	if !isValidCommitRef(commitHash) {
+		return "", fmt.Errorf("invalid commit hash: %q", commitHash)
+	}
 	cmd := exec.Command("git", "-C", c.repoPath, "show", commitHash+":"+filePath)
 	out, err := cmd.Output()
 	if err != nil {
@@ -386,6 +410,9 @@ func (c *Client) GetFileAtCommit(commitHash string, filePath string) (string, er
 
 // GetFileDiffWithCommit returns a unified diff of a file between a given commit and HEAD.
 func (c *Client) GetFileDiffWithCommit(commitHash string, filePath string) (string, error) {
+	if !isValidCommitRef(commitHash) {
+		return "", fmt.Errorf("invalid commit hash: %q", commitHash)
+	}
 	cmd := exec.Command("git", "-C", c.repoPath, "diff", commitHash+"..HEAD", "--", filePath)
 	out, err := cmd.Output()
 	if err != nil {

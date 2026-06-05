@@ -169,15 +169,17 @@ func (h *LLMRequesthandler) doEdit(ctx context.Context, model, content, task, in
 		"- \"content\": the edited markdown text\n" +
 		"- \"notes\": a brief description of what was changed\n\n" +
 		"Output the raw JSON only. Do not wrap it in markdown code fences."
+
+	userMessage := content
 	if instructions != "" {
-		system += "\n\nAdditional instructions from the user: " + instructions
+		userMessage += "\n\n---\nAdditional instructions: " + instructions
 	}
 
 	c := h.getClient()
 	if c == nil || !c.HasProviders() {
 		return llmResponse{}, fuego.HTTPError{Status: http.StatusNotImplemented, Detail: "LLM not configured"}
 	}
-	result, usage, err := c.Do(ctx, model, system, content)
+	result, usage, err := c.Do(ctx, model, system, userMessage)
 	if err != nil {
 		return llmResponse{}, llmError("edit", err)
 	}

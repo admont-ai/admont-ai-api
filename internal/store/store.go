@@ -23,9 +23,10 @@ import (
 )
 
 type Store struct {
-	pool          *pgxpool.Pool
-	dsn           string
-	encryptionKey []byte
+	pool                *pgxpool.Pool
+	dsn                 string
+	encryptionKey       []byte
+	legacyEncryptionKey []byte
 
 	Repos         *git_repo.Store
 	Users         *users.Store

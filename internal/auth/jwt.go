@@ -15,15 +15,24 @@ type Claims struct {
 	jwt.RegisteredClaims
 }
 
+type RefreshClaims struct {
+	Email    string `json:"email"`
+	Provider string `json:"provider,omitempty"`
+	Identity string `json:"identity,omitempty"`
+	jwt.RegisteredClaims
+}
+
 type JWTService struct {
-	secret     []byte
-	expiration time.Duration
+	secret            []byte
+	expiration        time.Duration
+	refreshExpiration time.Duration
 }
 
 func NewJWTService(secret string, expiration time.Duration) *JWTService {
 	return &JWTService{
-		secret:     []byte(secret),
-		expiration: expiration,
+		secret:            []byte(secret),
+		expiration:        expiration,
+		refreshExpiration: 7 * 24 * time.Hour,
 	}
 }
 
@@ -48,6 +57,26 @@ func (s *JWTService) GenerateToken(email, name, subject, provider string) (strin
 	return token.SignedString(s.secret)
 }
 
+func (s *JWTService) GenerateRefreshToken(email, provider string) (string, error) {
+	identity := email
+	if provider != "" {
+		identity = provider + ":" + email
+	}
+	now := time.Now()
+	claims := RefreshClaims{
+		Email:    email,
+		Provider: provider,
+		Identity: identity,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   "refresh",
+			IssuedAt:  jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(now.Add(s.refreshExpiration)),
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(s.secret)
+}
+
 func (s *JWTService) ValidateToken(tokenString string) (*Claims, error) {
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (any, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
@@ -62,6 +91,28 @@ func (s *JWTService) ValidateToken(tokenString string) (*Claims, error) {
 	claims, ok := token.Claims.(*Claims)
 	if !ok || !token.Valid {
 		return nil, errors.New("invalid token")
+	}
+
+	return claims, nil
+}
+
+func (s *JWTService) ValidateRefreshToken(tokenString string) (*RefreshClaims, error) {
+	token, err := jwt.ParseWithClaims(tokenString, &RefreshClaims{}, func(token *jwt.Token) (any, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, errors.New("unexpected signing method")
+		}
+		return s.secret, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	claims, ok := token.Claims.(*RefreshClaims)
+	if !ok || !token.Valid {
+		return nil, errors.New("invalid refresh token")
+	}
+	if claims.Subject != "refresh" {
+		return nil, errors.New("not a refresh token")
 	}
 
 	return claims, nil

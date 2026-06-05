@@ -1164,9 +1164,14 @@ func (h *RepoRequesthandler) ImportConfluence() gin.HandlerFunc {
 		}
 		defer file.Close()
 
-		data, err := io.ReadAll(file)
+		const maxConfluenceZipSize = 500 << 20 // 500 MB
+		data, err := io.ReadAll(io.LimitReader(file, maxConfluenceZipSize+1))
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read file: %v", err)})
+			return
+		}
+		if len(data) > maxConfluenceZipSize {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "zip file exceeds 500 MB limit"})
 			return
 		}
 
@@ -1178,23 +1183,29 @@ func (h *RepoRequesthandler) ImportConfluence() gin.HandlerFunc {
 
 		// Extract zip to the import path so the raw structure can be inspected.
 		extractDir := filepath.Join(h.importPath, ".confluence-import")
+		cleanExtractDir := filepath.Clean(extractDir) + string(os.PathSeparator)
 		if err := os.MkdirAll(extractDir, 0755); err != nil {
 			log.WithError(err).Warn("failed to create confluence extract dir")
 		} else {
 			for _, f := range zipReader.File {
-				if f.FileInfo().IsDir() {
-					os.MkdirAll(filepath.Join(extractDir, f.Name), 0755)
+				resolved := filepath.Clean(filepath.Join(extractDir, f.Name))
+				if !strings.HasPrefix(resolved, cleanExtractDir) && resolved != filepath.Clean(extractDir) {
+					log.WithField("entry", f.Name).Warn("zip slip attempt blocked")
 					continue
 				}
-				outPath := filepath.Join(extractDir, f.Name)
-				os.MkdirAll(filepath.Dir(outPath), 0755)
+				if f.FileInfo().IsDir() {
+					os.MkdirAll(resolved, 0755)
+					continue
+				}
+				os.MkdirAll(filepath.Dir(resolved), 0755)
 				rc, err := f.Open()
 				if err != nil {
 					continue
 				}
-				raw, _ := io.ReadAll(rc)
+				const maxEntrySize = 100 << 20 // 100 MB per entry
+				raw, _ := io.ReadAll(io.LimitReader(rc, maxEntrySize))
 				rc.Close()
-				os.WriteFile(outPath, raw, 0644)
+				os.WriteFile(resolved, raw, 0644)
 			}
 			log.WithField("path", extractDir).Info("extracted confluence zip for inspection")
 		}
