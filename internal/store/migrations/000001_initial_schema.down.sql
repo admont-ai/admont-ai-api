@@ -1,0 +1,22 @@
+DROP TRIGGER IF EXISTS trg_git_repos_updated_at ON git_repos;
+DROP TRIGGER IF EXISTS trg_user_groups_updated_at ON user_groups;
+DROP TRIGGER IF EXISTS trg_external_users_updated_at ON external_users;
+DROP TRIGGER IF EXISTS trg_internal_users_updated_at ON internal_users;
+DROP TRIGGER IF EXISTS trg_search_providers_updated_at ON search_providers;
+DROP TRIGGER IF EXISTS trg_llm_providers_updated_at ON llm_providers;
+DROP TRIGGER IF EXISTS trg_auth_providers_updated_at ON auth_providers;
+DROP TRIGGER IF EXISTS trg_settings_updated_at ON settings;
+DROP FUNCTION IF EXISTS update_updated_at();
+
+DROP TABLE IF EXISTS search_repo_state;
+DROP TABLE IF EXISTS git_repos;
+DROP TABLE IF EXISTS user_group_members;
+DROP TABLE IF EXISTS user_groups;
+DROP TABLE IF EXISTS external_users;
+DROP TABLE IF EXISTS internal_users;
+DROP TABLE IF EXISTS search_providers;
+DROP TABLE IF EXISTS llm_providers;
+DROP TABLE IF EXISTS auth_providers;
+DROP TABLE IF EXISTS settings;
+DROP TYPE IF EXISTS user_role;
+DROP SCHEMA IF EXISTS admont_ai;

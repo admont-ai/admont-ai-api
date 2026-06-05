@@ -1,0 +1,652 @@
+package mcp
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/url"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/christianfischer/md-wiki-server/internal/auth"
+	"github.com/christianfischer/md-wiki-server/internal/draft"
+	"github.com/christianfischer/md-wiki-server/internal/permissions"
+	"github.com/christianfischer/md-wiki-server/internal/pg_vector/backend"
+	"github.com/christianfischer/md-wiki-server/internal/pg_vector/indexer"
+	"github.com/christianfischer/md-wiki-server/internal/repo"
+	"github.com/christianfischer/md-wiki-server/internal/store/git_repo"
+	"github.com/gin-gonic/gin"
+	mcplib "github.com/mark3labs/mcp-go/mcp"
+	mcpserver "github.com/mark3labs/mcp-go/server"
+	log "github.com/sirupsen/logrus"
+)
+
+type contextKey string
+
+const (
+	userEmailKey    contextKey = "mcp_user_email"
+	userNameKey     contextKey = "mcp_user_name"
+	userIdentityKey contextKey = "mcp_user_identity"
+)
+
+func getUserEmail(ctx context.Context) string {
+	v, _ := ctx.Value(userEmailKey).(string)
+	return v
+}
+
+func getUserName(ctx context.Context) string {
+	v, _ := ctx.Value(userNameKey).(string)
+	return v
+}
+
+func getUserIdentity(ctx context.Context) string {
+	v, _ := ctx.Value(userIdentityKey).(string)
+	return v
+}
+
+// Server wraps the MCP protocol server and integrates with the wiki backend.
+type Server struct {
+	mcpServer *mcpserver.MCPServer
+	sseServer *mcpserver.SSEServer
+
+	backends      map[string]repo.RepoBackend
+	draftManagers map[string]*draft.Manager
+	docPaths      map[string]string
+	repoConfigs   map[string]*git_repo.GitRepo
+	repoReady     *sync.Map
+	permResolvers map[string]*permissions.Resolver
+	isSystemAdmin func(string) bool
+	idx           *indexer.Indexer
+	searchBackend *backend.Holder
+	repoState     backend.RepoStateStore
+
+	jwtService *auth.JWTService
+	registry   *auth.Registry
+	baseURL    string
+
+	// MCP OAuth: authorization codes and pending auth states
+	authCodes  sync.Map // code string → *authCodeEntry
+	authStates sync.Map // provider state string → *mcpAuthState
+
+	// Connected MCP sessions
+	mcpSessions sync.Map // sessionID string → *mcpClientSession
+}
+
+// mcpClientSession tracks an active MCP client connection.
+type mcpClientSession struct {
+	ID          string    `json:"id"`
+	Email       string    `json:"email"`
+	Name        string    `json:"name"`
+	Identity    string    `json:"identity"`
+	ConnectedAt time.Time `json:"connected_at"`
+	ctx         context.Context
+}
+
+type mcpAuthState struct {
+	ClientRedirectURI   string
+	ClientState         string
+	CodeChallenge       string
+	CodeChallengeMethod string
+	ProviderName        string
+	CreatedAt           time.Time
+}
+
+type authCodeEntry struct {
+	JWT                 string
+	CodeChallenge       string
+	CodeChallengeMethod string
+	ExpiresAt           time.Time
+}
+
+// NewServer creates a new MCP server wired to the wiki backend.
+func NewServer(
+	backends map[string]repo.RepoBackend,
+	draftManagers map[string]*draft.Manager,
+	docPaths map[string]string,
+	repoConfigs map[string]*git_repo.GitRepo,
+	repoReady *sync.Map,
+	permResolvers map[string]*permissions.Resolver,
+	jwtService *auth.JWTService,
+	registry *auth.Registry,
+	baseURL string,
+) *Server {
+	s := &Server{
+		backends:      backends,
+		draftManagers: draftManagers,
+		docPaths:      docPaths,
+		repoConfigs:   repoConfigs,
+		repoReady:     repoReady,
+		permResolvers: permResolvers,
+		jwtService:    jwtService,
+		registry:      registry,
+		baseURL:       strings.TrimRight(baseURL, "/"),
+	}
+
+	s.mcpServer = mcpserver.NewMCPServer(
+		"md-wiki-server",
+		"1.0.0",
+		mcpserver.WithToolCapabilities(true),
+	)
+
+	s.registerTools()
+
+	s.sseServer = mcpserver.NewSSEServer(s.mcpServer,
+		mcpserver.WithBaseURL(s.baseURL),
+		mcpserver.WithStaticBasePath("/mcp"),
+		mcpserver.WithSSEEndpoint("/sse"),
+		mcpserver.WithMessageEndpoint("/message"),
+		mcpserver.WithSSEContextFunc(s.contextFromRequest),
+	)
+
+	go s.cleanupLoop()
+
+	return s
+}
+
+func (s *Server) SetSystemAdminCheck(fn func(string) bool) {
+	s.isSystemAdmin = fn
+}
+
+func (s *Server) SetIndexer(idx *indexer.Indexer) {
+	s.idx = idx
+}
+
+func (s *Server) SetSearch(b *backend.Holder, rs backend.RepoStateStore) {
+	s.searchBackend = b
+	s.repoState = rs
+}
+
+// RegisterRoutes mounts all MCP-related routes on the Gin engine.
+func (s *Server) RegisterRoutes(r *gin.Engine) {
+	// OAuth discovery metadata
+	r.GET("/.well-known/oauth-authorization-server", s.oauthMetadata)
+	r.GET("/.well-known/oauth-protected-resource", s.protectedResourceMetadata)
+
+	mcp := r.Group("/mcp")
+	// OAuth endpoints
+	mcp.POST("/register", s.oauthRegister)
+	mcp.GET("/authorize", s.oauthAuthorize)
+	mcp.GET("/callback", s.oauthCallback)
+	mcp.POST("/token", s.oauthToken)
+	// SSE transport (auth required — returns 401 to trigger MCP OAuth flow)
+	mcp.GET("/sse", s.requireAuth, gin.WrapF(s.sseServer.ServeHTTP))
+	mcp.POST("/message", gin.WrapF(s.sseServer.ServeHTTP))
+}
+
+// requireAuth rejects unauthenticated requests with 401 + WWW-Authenticate header.
+func (s *Server) requireAuth(c *gin.Context) {
+	token := ""
+	if h := c.GetHeader("Authorization"); strings.HasPrefix(h, "Bearer ") {
+		token = strings.TrimPrefix(h, "Bearer ")
+	}
+	if token == "" {
+		token = c.Query("access_token")
+	}
+	if token == "" {
+		s.sendUnauthorized(c)
+		return
+	}
+	claims, err := s.jwtService.ValidateToken(token)
+	if err != nil {
+		log.WithError(err).Warn("MCP: invalid or expired JWT")
+		s.sendUnauthorized(c)
+		return
+	}
+
+	identity := claims.Identity
+	if identity == "" {
+		identity = claims.Email
+	}
+
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err == nil {
+		sessionID := base64.RawURLEncoding.EncodeToString(b)
+		s.mcpSessions.Store(sessionID, &mcpClientSession{
+			ID:          sessionID,
+			Email:       claims.Email,
+			Name:        claims.Name,
+			Identity:    identity,
+			ConnectedAt: time.Now(),
+			ctx:         c.Request.Context(),
+		})
+		go func() {
+			<-c.Request.Context().Done()
+			s.mcpSessions.Delete(sessionID)
+		}()
+	}
+
+	c.Next()
+}
+
+func (s *Server) sendUnauthorized(c *gin.Context) {
+	c.Header("WWW-Authenticate", fmt.Sprintf(
+		`Bearer resource_metadata="%s/.well-known/oauth-protected-resource"`,
+		s.baseURL,
+	))
+	c.AbortWithStatus(http.StatusUnauthorized)
+}
+
+func (s *Server) protectedResourceMetadata(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"resource":                 s.baseURL,
+		"authorization_servers":    []string{s.baseURL},
+		"bearer_methods_supported": []string{"header"},
+	})
+}
+
+// contextFromRequest validates the JWT from the SSE connection and injects user info.
+func (s *Server) contextFromRequest(ctx context.Context, r *http.Request) context.Context {
+	token := ""
+	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+		token = strings.TrimPrefix(h, "Bearer ")
+	}
+	if token == "" {
+		token = r.URL.Query().Get("access_token")
+	}
+	if token == "" {
+		return ctx
+	}
+
+	claims, err := s.jwtService.ValidateToken(token)
+	if err != nil {
+		log.WithError(err).Warn("MCP: invalid JWT on SSE connection")
+		return ctx
+	}
+
+	identity := claims.Identity
+	if identity == "" {
+		identity = claims.Email
+	}
+
+	ctx = context.WithValue(ctx, userEmailKey, claims.Email)
+	ctx = context.WithValue(ctx, userNameKey, claims.Name)
+	ctx = context.WithValue(ctx, userIdentityKey, identity)
+	return ctx
+}
+
+// ConnectedClients returns active MCP sessions for the given identity.
+// If identity is empty, returns all sessions.
+func (s *Server) ConnectedClients(identity string) []mcpClientSession {
+	var result []mcpClientSession
+	s.mcpSessions.Range(func(_, value any) bool {
+		sess := value.(*mcpClientSession)
+		if sess.ctx.Err() != nil {
+			s.mcpSessions.Delete(sess.ID)
+			return true
+		}
+		if identity == "" || sess.Identity == identity || sess.Email == identity {
+			result = append(result, *sess)
+		}
+		return true
+	})
+	return result
+}
+
+// --- OAuth Authorization Server for MCP Clients ---
+
+func (s *Server) oauthMetadata(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"issuer":                                s.baseURL,
+		"authorization_endpoint":                s.baseURL + "/mcp/authorize",
+		"token_endpoint":                        s.baseURL + "/mcp/token",
+		"registration_endpoint":                 s.baseURL + "/mcp/register",
+		"response_types_supported":              []string{"code"},
+		"grant_types_supported":                 []string{"authorization_code"},
+		"code_challenge_methods_supported":      []string{"S256"},
+		"token_endpoint_auth_methods_supported": []string{"none"},
+	})
+}
+
+// oauthRegister implements RFC 7591 Dynamic Client Registration.
+func (s *Server) oauthRegister(c *gin.Context) {
+	var req map[string]any
+	if err := c.BindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	clientID := base64.RawURLEncoding.EncodeToString(b)
+
+	resp := map[string]any{
+		"client_id":                  clientID,
+		"client_id_issued_at":        time.Now().Unix(),
+		"token_endpoint_auth_method": "none",
+	}
+	if uris, ok := req["redirect_uris"]; ok {
+		resp["redirect_uris"] = uris
+	}
+	if name, ok := req["client_name"]; ok {
+		resp["client_name"] = name
+	}
+
+	c.JSON(http.StatusCreated, resp)
+}
+
+func (s *Server) oauthAuthorize(c *gin.Context) {
+	redirectURI := c.Query("redirect_uri")
+	state := c.Query("state")
+	codeChallenge := c.Query("code_challenge")
+	codeChallengeMethod := c.Query("code_challenge_method")
+	provider := c.Query("provider")
+
+	if redirectURI == "" || codeChallenge == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "redirect_uri and code_challenge are required"})
+		return
+	}
+	if codeChallengeMethod == "" {
+		codeChallengeMethod = "S256"
+	}
+
+	// If no provider specified, let the user choose (or auto-select if only one).
+	if provider == "" {
+		names := s.registry.Names()
+		sort.Strings(names)
+		if len(names) == 0 {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "no auth providers configured"})
+			return
+		}
+		if len(names) == 1 {
+			provider = names[0]
+		} else {
+			s.renderProviderChooser(c, names)
+			return
+		}
+	}
+
+	// Start OAuth flow via registry
+	providerAuthURL, providerState, err := s.registry.GenerateAuthURL(provider, "")
+	if err != nil {
+		log.WithError(err).Error("MCP: failed to generate auth URL")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to initiate authentication"})
+		return
+	}
+
+	// Track the MCP client's request, keyed by the provider OAuth state
+	s.authStates.Store(providerState, &mcpAuthState{
+		ClientRedirectURI:   redirectURI,
+		ClientState:         state,
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: codeChallengeMethod,
+		ProviderName:        provider,
+		CreatedAt:           time.Now(),
+	})
+
+	c.Redirect(http.StatusTemporaryRedirect, providerAuthURL)
+}
+
+// renderProviderChooser shows an HTML page letting the user pick an auth provider.
+// It preserves all original query parameters and adds the selected provider.
+func (s *Server) renderProviderChooser(c *gin.Context, providers []string) {
+	// Build buttons that re-submit to the same endpoint with ?provider=name added.
+	var buttons strings.Builder
+	for _, p := range providers {
+		q := c.Request.URL.Query()
+		q.Set("provider", p)
+		href := "/mcp/authorize?" + q.Encode()
+		fmt.Fprintf(&buttons,
+			`<a href="%s" class="btn">%s</a>`,
+			href, auth.ProviderDisplayName(p),
+		)
+	}
+
+	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(fmt.Sprintf(`<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Choose Login Provider</title>
+<style>
+  body{font-family:system-ui,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#f5f5f5}
+  .card{background:#fff;border-radius:12px;padding:2rem;box-shadow:0 2px 8px rgba(0,0,0,.1);text-align:center;max-width:360px;width:100%%}
+  h2{margin:0 0 1.5rem;color:#333}
+  .btn{display:block;padding:.75rem 1.5rem;margin:.5rem 0;border-radius:8px;background:#2563eb;color:#fff;text-decoration:none;font-size:1rem;transition:background .15s}
+  .btn:hover{background:#1d4ed8}
+</style></head>
+<body><div class="card"><h2>Sign in with</h2>%s</div></body></html>`, buttons.String())))
+}
+
+func (s *Server) oauthCallback(c *gin.Context) {
+	code := c.Query("code")
+	providerState := c.Query("state")
+
+	if code == "" || providerState == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "code and state are required"})
+		return
+	}
+
+	// Retrieve the MCP auth state
+	stateVal, ok := s.authStates.LoadAndDelete(providerState)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or expired state"})
+		return
+	}
+	mcpState := stateVal.(*mcpAuthState)
+
+	if time.Since(mcpState.CreatedAt) > 10*time.Minute {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "authentication timed out"})
+		return
+	}
+
+	// Exchange code and fetch user info via registry
+	userInfo, _, err := s.registry.ExchangeAndValidate(c.Request.Context(), providerState, code)
+	if err != nil {
+		log.WithError(err).Warn("MCP OAuth: code exchange failed")
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication failed"})
+		return
+	}
+
+	// Map "hydra" provider to "internal" so the JWT identity matches internal user identities.
+	provider := userInfo.Provider
+	if provider == "hydra" {
+		provider = "internal"
+	}
+
+	// Generate our JWT
+	jwt, err := s.jwtService.GenerateToken(userInfo.Email, userInfo.Name, userInfo.Subject, provider)
+	if err != nil {
+		log.WithError(err).Error("MCP OAuth: failed to generate JWT")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
+		return
+	}
+
+	// Issue an authorization code for the MCP client
+	codeBytes := make([]byte, 32)
+	if _, err := rand.Read(codeBytes); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	authCode := base64.RawURLEncoding.EncodeToString(codeBytes)
+
+	s.authCodes.Store(authCode, &authCodeEntry{
+		JWT:                 jwt,
+		CodeChallenge:       mcpState.CodeChallenge,
+		CodeChallengeMethod: mcpState.CodeChallengeMethod,
+		ExpiresAt:           time.Now().Add(5 * time.Minute),
+	})
+
+	// Redirect back to the MCP client's redirect_uri with the authorization code
+	u, err := url.Parse(mcpState.ClientRedirectURI)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid redirect_uri"})
+		return
+	}
+	q := u.Query()
+	q.Set("code", authCode)
+	if mcpState.ClientState != "" {
+		q.Set("state", mcpState.ClientState)
+	}
+	u.RawQuery = q.Encode()
+	c.Redirect(http.StatusTemporaryRedirect, u.String())
+}
+
+func (s *Server) oauthToken(c *gin.Context) {
+	grantType := c.PostForm("grant_type")
+	if grantType != "authorization_code" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported grant_type"})
+		return
+	}
+
+	code := c.PostForm("code")
+	codeVerifier := c.PostForm("code_verifier")
+	if code == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "code is required"})
+		return
+	}
+
+	codeVal, ok := s.authCodes.LoadAndDelete(code)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or expired code"})
+		return
+	}
+	entry := codeVal.(*authCodeEntry)
+
+	if time.Now().After(entry.ExpiresAt) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "code expired"})
+		return
+	}
+
+	// Verify PKCE
+	if entry.CodeChallengeMethod == "S256" && codeVerifier != "" {
+		hash := sha256.Sum256([]byte(codeVerifier))
+		computed := base64.RawURLEncoding.EncodeToString(hash[:])
+		if computed != entry.CodeChallenge {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid code_verifier"})
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"access_token": entry.JWT,
+		"token_type":   "Bearer",
+		"expires_in":   86400,
+	})
+}
+
+// --- Permission & Access Helpers ---
+
+func (s *Server) isReadOnly(repoSlug string) bool {
+	rc, ok := s.repoConfigs[repoSlug]
+	return ok && rc.ReadOnly
+}
+
+func (s *Server) checkPermission(repoSlug, identity, path string, required permissions.Level) error {
+	if s.isReadOnly(repoSlug) && required > permissions.Viewer {
+		return fmt.Errorf("not found")
+	}
+	if identity != "" && s.isSystemAdmin != nil && s.isSystemAdmin(identity) {
+		return nil
+	}
+	if isDotPath(path) {
+		return fmt.Errorf("not found")
+	}
+	resolver := s.permResolvers[repoSlug]
+	if resolver == nil {
+		if identity == "" && required <= permissions.Viewer {
+			return nil
+		}
+		if identity == "" {
+			return fmt.Errorf("authentication required")
+		}
+		return fmt.Errorf("not found")
+	}
+	if !resolver.Check(identity, path, required) {
+		if identity == "" {
+			return fmt.Errorf("authentication required")
+		}
+		return fmt.Errorf("not found")
+	}
+	return nil
+}
+
+func (s *Server) canAccessRepo(repoSlug, identity string) bool {
+	rc, ok := s.repoConfigs[repoSlug]
+	if !ok {
+		return false
+	}
+	if rc.PublicAccess {
+		return true
+	}
+	return identity != ""
+}
+
+func (s *Server) shouldIndex(repoSlug string) bool {
+	if s.idx == nil {
+		return false
+	}
+	rc, ok := s.repoConfigs[repoSlug]
+	return ok && rc.SearchProviderID != nil
+}
+
+func (s *Server) savePermissions(repoSlug string) {
+	resolver := s.permResolvers[repoSlug]
+	if resolver == nil {
+		return
+	}
+	backend, ok := s.backends[repoSlug]
+	if !ok {
+		return
+	}
+	data, err := permissions.Marshal(resolver)
+	if err != nil {
+		log.WithError(err).WithField("repo", repoSlug).Warn("MCP: failed to marshal permissions file")
+		return
+	}
+	if err := backend.AddFile("", permissions.PermissionsFileName, data); err != nil {
+		log.WithError(err).WithField("repo", repoSlug).Warn("MCP: failed to save permissions file")
+	}
+}
+
+func isDotPath(filePath string) bool {
+	for _, part := range strings.Split(filePath, "/") {
+		if strings.HasPrefix(part, ".") {
+			return true
+		}
+	}
+	return false
+}
+
+func splitPath(filePath string) (subfolder, filename string) {
+	subfolder = filepath.Dir(filePath)
+	if subfolder == "." {
+		subfolder = ""
+	}
+	filename = filepath.Base(filePath)
+	return
+}
+
+func jsonResult(v any) *mcplib.CallToolResult {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return mcplib.NewToolResultError("failed to serialize result")
+	}
+	return mcplib.NewToolResultText(string(data))
+}
+
+func (s *Server) cleanupLoop() {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		now := time.Now()
+		s.authCodes.Range(func(key, value any) bool {
+			if now.After(value.(*authCodeEntry).ExpiresAt) {
+				s.authCodes.Delete(key)
+			}
+			return true
+		})
+		s.authStates.Range(func(key, value any) bool {
+			if now.Sub(value.(*mcpAuthState).CreatedAt) > 10*time.Minute {
+				s.authStates.Delete(key)
+			}
+			return true
+		})
+	}
+}

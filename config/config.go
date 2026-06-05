@@ -1,0 +1,115 @@
+package config
+
+import (
+	"fmt"
+
+	"github.com/joho/godotenv"
+	"github.com/spf13/viper"
+)
+
+type DatabaseConfig struct {
+	Hostname string `mapstructure:"hostname"`
+	Port     int    `mapstructure:"port"`
+	Username string `mapstructure:"username"`
+	Password string `mapstructure:"password"`
+	DB       string `mapstructure:"db"`
+	SSL      bool   `mapstructure:"ssl"`
+}
+
+func (d *DatabaseConfig) DSN() string {
+	sslMode := "disable"
+	if d.SSL {
+		sslMode = "require"
+	}
+	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
+		d.Username, d.Password, d.Hostname, d.Port, d.DB, sslMode)
+}
+
+type InternalAuthConfig struct {
+	Enabled                bool   `mapstructure:"enabled"`
+	AdminURL               string `mapstructure:"admin_url"`
+	PublicURL              string `mapstructure:"public_url"`
+	MaxFailedLogin         int    `mapstructure:"max_failed_login"`
+	FailedLoginIntervalMin int    `mapstructure:"failed_login_interval_mins"`
+}
+
+type SearchConfig struct {
+	OnnxRuntimePath string `mapstructure:"onnx_runtime_path"`
+	ModelPath       string `mapstructure:"model_path"`
+	VocabPath       string `mapstructure:"vocab_path"`
+}
+
+type Config struct {
+	Hostname        string             `mapstructure:"hostname"`
+	Port            int                `mapstructure:"port"`
+	ReleaseMode     bool               `mapstructure:"release_mode"`
+	AllowedOrigins  []string           `mapstructure:"allowed_origins"`
+	EncryptionKey   string             `mapstructure:"encryption_key"`
+	JWTSecret       string             `mapstructure:"jwt_secret"`
+	AuthBaseURL     string             `mapstructure:"auth_base_url"`
+	LanguageToolURL string             `mapstructure:"languagetool_url"`
+	Database        DatabaseConfig     `mapstructure:"database"`
+	RepoClonePath   string             `mapstructure:"repo_clone_path"`
+	LocalRepoPath   string             `mapstructure:"local_repo_path"`
+	InternalAuth    InternalAuthConfig `mapstructure:"internal_auth"`
+	Search          SearchConfig       `mapstructure:"search"`
+	ImportPath      string             `mapstructure:"import_path"`
+}
+
+func Load() (*Config, error) {
+	// Load .env file if present (does not override existing env vars).
+	_ = godotenv.Load()
+
+	viper.SetConfigName("config")
+	viper.SetConfigType("yaml")
+	viper.AddConfigPath(".")
+
+	viper.SetDefault("hostname", "0.0.0.0")
+	viper.SetDefault("port", 8080)
+	viper.SetDefault("allowed_origins", "http://localhost:5173")
+	viper.SetDefault("database.hostname", "localhost")
+	viper.SetDefault("database.port", 5433)
+	viper.SetDefault("database.username", "admin")
+	viper.SetDefault("database.password", "admin")
+	viper.SetDefault("database.db", "admont-ai")
+	viper.SetDefault("internal_auth.enabled", true)
+	viper.SetDefault("internal_auth.admin_url", "http://localhost:4445")
+	viper.SetDefault("internal_auth.public_url", "http://localhost:4444")
+	viper.SetDefault("internal_auth.max_failed_login", 5)
+	viper.SetDefault("internal_auth.failed_login_interval_mins", 15)
+	viper.SetDefault("repo_clone_path", "/tmp/admont-api/repos")
+	viper.SetDefault("local_repo_path", "/tmp/admont-api/local-repos")
+	viper.SetDefault("search.onnx_runtime_path", "/opt/homebrew/lib/libonnxruntime.dylib")
+	viper.SetDefault("search.model_path", "models/model.onnx")
+	viper.SetDefault("search.vocab_path", "models/vocab.txt")
+
+	viper.SetDefault("import_path", "/tmp/admont-api/import")
+
+	viper.AutomaticEnv()
+
+	// Explicit bindings for env vars that don't match viper's auto-detection.
+	_ = viper.BindEnv("jwt_secret", "JWT_SECRET")
+	_ = viper.BindEnv("auth_base_url", "AUTH_BASE_URL")
+	_ = viper.BindEnv("languagetool_url", "LANGUAGETOOL_URL")
+	_ = viper.BindEnv("import_path", "IMPORT_PATH")
+	_ = viper.BindEnv("search.onnx_runtime_path", "SEARCH_ONNX_RUNTIME_PATH")
+	_ = viper.BindEnv("search.model_path", "SEARCH_MODEL_PATH")
+	_ = viper.BindEnv("search.vocab_path", "SEARCH_VOCAB_PATH")
+
+	if err := viper.ReadInConfig(); err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+			return nil, fmt.Errorf("reading config: %w", err)
+		}
+	}
+
+	var cfg Config
+	if err := viper.Unmarshal(&cfg); err != nil {
+		return nil, fmt.Errorf("unmarshaling config: %w", err)
+	}
+
+	return &cfg, nil
+}
+
+func (c *Config) Addr() string {
+	return fmt.Sprintf("%s:%d", c.Hostname, c.Port)
+}
