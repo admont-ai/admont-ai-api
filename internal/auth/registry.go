@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -134,14 +135,15 @@ func (r *Registry) ExchangeAndValidate(ctx context.Context, state, code string) 
 		return nil, "", fmt.Errorf("exchanging code: %w", err)
 	}
 
-	// Use goth's FetchUser to get user info.
-	// The OIDC provider needs the id_token to extract user claims.
-	sessionJSON := fmt.Sprintf(`{"AuthURL":"%s","AccessToken":"%s"`, entry.OAuthConfig.Endpoint.AuthURL, token.AccessToken)
-	if idToken, ok := token.Extra("id_token").(string); ok && idToken != "" {
-		sessionJSON += fmt.Sprintf(`,"IDToken":"%s"`, idToken)
+	sessionData := map[string]string{
+		"AuthURL":     entry.OAuthConfig.Endpoint.AuthURL,
+		"AccessToken": token.AccessToken,
 	}
-	sessionJSON += "}"
-	sess, err := entry.GothProvider.UnmarshalSession(sessionJSON)
+	if idToken, ok := token.Extra("id_token").(string); ok && idToken != "" {
+		sessionData["IDToken"] = idToken
+	}
+	sessionJSON, _ := json.Marshal(sessionData)
+	sess, err := entry.GothProvider.UnmarshalSession(string(sessionJSON))
 	if err != nil {
 		return nil, "", fmt.Errorf("creating goth session: %w", err)
 	}
@@ -199,8 +201,12 @@ func (r *Registry) FetchUser(providerName, accessToken string) (*UserInfo, error
 		return nil, fmt.Errorf("provider %q not found", providerName)
 	}
 
-	gothSession := fmt.Sprintf(`{"AuthURL":"%s","AccessToken":"%s"}`, entry.OAuthConfig.Endpoint.AuthURL, accessToken)
-	sess, err := entry.GothProvider.UnmarshalSession(gothSession)
+	fetchSessionData := map[string]string{
+		"AuthURL":     entry.OAuthConfig.Endpoint.AuthURL,
+		"AccessToken": accessToken,
+	}
+	fetchSessionJSON, _ := json.Marshal(fetchSessionData)
+	sess, err := entry.GothProvider.UnmarshalSession(string(fetchSessionJSON))
 	if err != nil {
 		return nil, fmt.Errorf("creating goth session: %w", err)
 	}

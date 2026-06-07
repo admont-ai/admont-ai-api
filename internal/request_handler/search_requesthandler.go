@@ -1,9 +1,9 @@
 package requesthandler
 
 import (
-	"fmt"
 	"net/http"
 
+	"github.com/christianfischer/md-wiki-server/internal/permissions"
 	"github.com/christianfischer/md-wiki-server/internal/pg_vector/backend"
 	"github.com/christianfischer/md-wiki-server/internal/repo"
 	"github.com/christianfischer/md-wiki-server/internal/store/git_repo"
@@ -39,14 +39,15 @@ type statusResponse struct {
 }
 
 type SearchRequesthandler struct {
-	backend     *backend.Holder
-	repoState   backend.RepoStateStore
-	backends    map[string]repo.RepoBackend
-	repoConfigs map[string]*git_repo.GitRepo
+	backend       *backend.Holder
+	repoState     backend.RepoStateStore
+	backends      map[string]repo.RepoBackend
+	repoConfigs   map[string]*git_repo.GitRepo
+	permResolvers map[string]*permissions.Resolver
 }
 
-func NewSearchRequesthandler(b *backend.Holder, rs backend.RepoStateStore, backends map[string]repo.RepoBackend, repoConfigs map[string]*git_repo.GitRepo) *SearchRequesthandler {
-	return &SearchRequesthandler{backend: b, repoState: rs, backends: backends, repoConfigs: repoConfigs}
+func NewSearchRequesthandler(b *backend.Holder, rs backend.RepoStateStore, backends map[string]repo.RepoBackend, repoConfigs map[string]*git_repo.GitRepo, permResolvers map[string]*permissions.Resolver) *SearchRequesthandler {
+	return &SearchRequesthandler{backend: b, repoState: rs, backends: backends, repoConfigs: repoConfigs, permResolvers: permResolvers}
 }
 
 func (h *SearchRequesthandler) Search(c fuego.ContextWithBody[searchRequest]) (searchResponse, error) {
@@ -141,7 +142,7 @@ func (h *SearchRequesthandler) Search(c fuego.ContextWithBody[searchRequest]) (s
 		log.WithError(err).Warn("search failed")
 		return searchResponse{}, fuego.HTTPError{
 			Status: http.StatusInternalServerError,
-			Detail: fmt.Sprintf("search failed: %v", err),
+			Detail: "search failed",
 		}
 	}
 
@@ -157,7 +158,7 @@ func (h *SearchRequesthandler) Status(c fuego.ContextNoBody) (statusResponse, er
 	if err != nil {
 		return statusResponse{}, fuego.HTTPError{
 			Status: http.StatusInternalServerError,
-			Detail: fmt.Sprintf("failed to get status: %v", err),
+			Detail: "failed to get status",
 		}
 	}
 	if states == nil {
@@ -203,11 +204,15 @@ func (h *SearchRequesthandler) canAccessRepo(repoSlug, userEmail string) bool {
 	if settings == nil {
 		return false
 	}
-
 	if settings.PublicAccess {
 		return true
 	}
-
-	// Non-public repos require authentication
-	return userEmail != ""
+	if userEmail == "" {
+		return false
+	}
+	resolver := h.permResolvers[repoSlug]
+	if resolver == nil {
+		return true
+	}
+	return resolver.Check(userEmail, "/", permissions.Viewer)
 }

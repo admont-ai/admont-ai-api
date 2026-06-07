@@ -5,6 +5,7 @@ import (
 
 	"github.com/christianfischer/md-wiki-server/internal/checker"
 	"github.com/go-fuego/fuego"
+	log "github.com/sirupsen/logrus"
 )
 
 type checkerRequest struct {
@@ -37,7 +38,8 @@ func (h *CheckerRequesthandler) Check(c fuego.ContextWithBody[checkerRequest]) (
 
 	result, err := h.checker.Check(c.Context(), body.Text, body.Language)
 	if err != nil {
-		return checkerResponse{}, fuego.HTTPError{Status: http.StatusBadGateway, Detail: "Checker error: " + err.Error()}
+		log.WithError(err).Warn("checker failed")
+		return checkerResponse{}, fuego.HTTPError{Status: http.StatusBadGateway, Detail: "checker service unavailable"}
 	}
 
 	annotations := result.Annotations

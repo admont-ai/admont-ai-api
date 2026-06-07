@@ -44,6 +44,7 @@ type Config struct {
 	Port            int                `mapstructure:"port"`
 	ReleaseMode     bool               `mapstructure:"release_mode"`
 	AllowedOrigins  []string           `mapstructure:"allowed_origins"`
+	TrustedProxies  []string           `mapstructure:"trusted_proxies"`
 	EncryptionKey   string             `mapstructure:"encryption_key"`
 	JWTSecret       string             `mapstructure:"jwt_secret"`
 	AuthBaseURL     string             `mapstructure:"auth_base_url"`

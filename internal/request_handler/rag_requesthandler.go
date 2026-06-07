@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/christianfischer/md-wiki-server/internal/llm"
+	"github.com/christianfischer/md-wiki-server/internal/permissions"
 	"github.com/christianfischer/md-wiki-server/internal/pg_vector/backend"
 	"github.com/christianfischer/md-wiki-server/internal/repo"
 	"github.com/christianfischer/md-wiki-server/internal/store/ai_conversation"
@@ -43,17 +44,18 @@ type ragResponse struct {
 }
 
 type RAGRequesthandler struct {
-	mu          sync.RWMutex
-	llmClient   *llm.Client
-	backend     *backend.Holder
-	backends    map[string]repo.RepoBackend
-	repoConfigs map[string]*git_repo.GitRepo
-	convStore   *ai_conversation.Store
-	summarizer  *llm.Summarizer
+	mu            sync.RWMutex
+	llmClient     *llm.Client
+	backend       *backend.Holder
+	backends      map[string]repo.RepoBackend
+	repoConfigs   map[string]*git_repo.GitRepo
+	permResolvers map[string]*permissions.Resolver
+	convStore     *ai_conversation.Store
+	summarizer    *llm.Summarizer
 }
 
-func NewRAGRequesthandler(llmClient *llm.Client, b *backend.Holder, backends map[string]repo.RepoBackend, repoConfigs map[string]*git_repo.GitRepo) *RAGRequesthandler {
-	return &RAGRequesthandler{llmClient: llmClient, backend: b, backends: backends, repoConfigs: repoConfigs}
+func NewRAGRequesthandler(llmClient *llm.Client, b *backend.Holder, backends map[string]repo.RepoBackend, repoConfigs map[string]*git_repo.GitRepo, permResolvers map[string]*permissions.Resolver) *RAGRequesthandler {
+	return &RAGRequesthandler{llmClient: llmClient, backend: b, backends: backends, repoConfigs: repoConfigs, permResolvers: permResolvers}
 }
 
 func (h *RAGRequesthandler) SetConversationStore(store *ai_conversation.Store, summarizer *llm.Summarizer) {
@@ -239,7 +241,7 @@ func (h *RAGRequesthandler) RAG(c fuego.ContextWithBody[ragRequest]) (ragRespons
 		log.WithError(err).Warn("RAG LLM call failed")
 		return ragResponse{}, fuego.HTTPError{
 			Status: http.StatusInternalServerError,
-			Detail: fmt.Sprintf("LLM failed: %v", err),
+			Detail: "LLM request failed",
 		}
 	}
 
@@ -317,7 +319,14 @@ func (h *RAGRequesthandler) canAccessRepo(repoSlug, userEmail string) bool {
 	if settings.PublicAccess {
 		return true
 	}
-	return userEmail != ""
+	if userEmail == "" {
+		return false
+	}
+	resolver := h.permResolvers[repoSlug]
+	if resolver == nil {
+		return true
+	}
+	return resolver.Check(userEmail, "/", permissions.Viewer)
 }
 
 func (h *RAGRequesthandler) loadRepoSettings(slug string) *searchRepoSettings {

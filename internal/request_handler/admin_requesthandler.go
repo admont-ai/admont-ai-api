@@ -54,7 +54,14 @@ type AdminRequesthandler struct {
 	mcpRegistry          *auth.Registry
 	modelRegistry        *llm.ModelRegistry
 	llmRebuild           func()
+	invalidateSessions   func(identity string)
 	mu                   sync.RWMutex
+}
+
+// SetSessionInvalidator sets the callback used to revoke a user's existing
+// tokens after an admin changes their password.
+func (h *AdminRequesthandler) SetSessionInvalidator(fn func(identity string)) {
+	h.invalidateSessions = fn
 }
 
 // SetIndexer sets the optional search indexer for triggering index updates on repo add/remove.
@@ -133,6 +140,29 @@ func (h *AdminRequesthandler) CanManageRepos(identity string) bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return h.hasRole(identity, users.RoleRepoAdmin)
+}
+
+// IsSuperAdmin reports whether the identity belongs to a super admin.
+func (h *AdminRequesthandler) IsSuperAdmin(identity string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, u := range h.users {
+		if auth.MatchIdentity(u.Identity(), identity) {
+			return u.SuperAdmin
+		}
+	}
+	return false
+}
+
+// countSuperAdmins returns the number of super-admin users. Caller must hold mu.
+func (h *AdminRequesthandler) countSuperAdmins() int {
+	n := 0
+	for _, u := range h.users {
+		if u.SuperAdmin {
+			n++
+		}
+	}
+	return n
 }
 
 // hasRole checks if a user with the given identity has the specified role. Caller must hold at least mu.RLock.
@@ -412,6 +442,15 @@ func (h *AdminRequesthandler) AddInternalUser(c fuego.ContextWithBody[addInterna
 		return users.UserEntry{}, fuego.BadRequestError{Detail: "password is required"}
 	}
 
+	// Only super admins may create users with super-admin status or roles.
+	if body.SuperAdmin || len(body.Roles) > 0 {
+		callerID, _ := ginCtxBody(c).Get("user_identity")
+		cid, _ := callerID.(string)
+		if !h.IsSuperAdmin(cid) {
+			return users.UserEntry{}, fuego.ForbiddenError{Detail: "only a super admin can assign roles or super-admin status"}
+		}
+	}
+
 	ctx := context.Background()
 	roles := body.Roles
 	if roles == nil {
@@ -467,6 +506,15 @@ func (h *AdminRequesthandler) UpdateInternalUser(c fuego.ContextWithBody[updateI
 		return users.UserEntry{}, fuego.BadRequestError{Detail: "invalid request body"}
 	}
 
+	// Only super admins may grant/revoke super-admin status or modify roles.
+	if body.SuperAdmin != nil || body.Roles != nil {
+		callerID, _ := ginCtxBody(c).Get("user_identity")
+		cid, _ := callerID.(string)
+		if !h.IsSuperAdmin(cid) {
+			return users.UserEntry{}, fuego.ForbiddenError{Detail: "only a super admin can modify roles or super-admin status"}
+		}
+	}
+
 	ctx := context.Background()
 
 	h.mu.Lock()
@@ -474,6 +522,10 @@ func (h *AdminRequesthandler) UpdateInternalUser(c fuego.ContextWithBody[updateI
 
 	for i := range h.users {
 		if h.users[i].Internal && h.users[i].Email == email {
+			// Prevent removing the last super admin via demotion.
+			if h.users[i].SuperAdmin && body.SuperAdmin != nil && !*body.SuperAdmin && h.countSuperAdmins() <= 1 {
+				return users.UserEntry{}, fuego.BadRequestError{Detail: "cannot demote the last super admin"}
+			}
 			if body.FirstName != nil {
 				h.users[i].FirstName = *body.FirstName
 			}
@@ -505,6 +557,10 @@ func (h *AdminRequesthandler) UpdateInternalUser(c fuego.ContextWithBody[updateI
 				if err := h.store.Users.SetPasswordHash(ctx, email, string(hash)); err != nil {
 					return users.UserEntry{}, fuego.InternalServerError{Detail: fmt.Sprintf("saving password: %v", err)}
 				}
+				// Revoke the user's existing tokens after an admin password reset.
+				if h.invalidateSessions != nil {
+					h.invalidateSessions(h.users[i].Identity())
+				}
 			}
 
 			log.WithFields(log.Fields{"email": email}).Info("internal user updated via admin API")
@@ -529,6 +585,9 @@ func (h *AdminRequesthandler) DeleteInternalUser(c fuego.ContextNoBody) (message
 
 	for i := range h.users {
 		if h.users[i].Internal && h.users[i].Email == email {
+			if h.users[i].SuperAdmin && h.countSuperAdmins() <= 1 {
+				return messageResponse{}, fuego.BadRequestError{Detail: "cannot delete the last super admin"}
+			}
 			if err := h.store.Users.DeleteInternalUser(ctx, email); err != nil {
 				return messageResponse{}, fuego.InternalServerError{Detail: fmt.Sprintf("deleting user: %v", err)}
 			}
@@ -611,6 +670,15 @@ func (h *AdminRequesthandler) AddExternalUser(c fuego.ContextWithBody[addExterna
 		return users.UserEntry{}, fuego.BadRequestError{Detail: "email is required"}
 	}
 
+	// Only super admins may create users with super-admin status or roles.
+	if body.SuperAdmin || len(body.Roles) > 0 {
+		callerID, _ := ginCtxBody(c).Get("user_identity")
+		cid, _ := callerID.(string)
+		if !h.IsSuperAdmin(cid) {
+			return users.UserEntry{}, fuego.ForbiddenError{Detail: "only a super admin can assign roles or super-admin status"}
+		}
+	}
+
 	ctx := context.Background()
 	providerID, err := h.store.Auth.GetAuthProviderID(ctx, body.Provider)
 	if err != nil {
@@ -664,6 +732,15 @@ func (h *AdminRequesthandler) UpdateExternalUser(c fuego.ContextWithBody[updateE
 		return users.UserEntry{}, fuego.BadRequestError{Detail: "invalid request body"}
 	}
 
+	// Only super admins may grant/revoke super-admin status or modify roles.
+	if body.SuperAdmin != nil || body.Roles != nil {
+		callerID, _ := gc.Get("user_identity")
+		cid, _ := callerID.(string)
+		if !h.IsSuperAdmin(cid) {
+			return users.UserEntry{}, fuego.ForbiddenError{Detail: "only a super admin can modify roles or super-admin status"}
+		}
+	}
+
 	ctx := context.Background()
 
 	h.mu.Lock()
@@ -671,6 +748,9 @@ func (h *AdminRequesthandler) UpdateExternalUser(c fuego.ContextWithBody[updateE
 
 	for i := range h.users {
 		if !h.users[i].Internal && h.users[i].Provider == providerName && h.users[i].Email == email {
+			if h.users[i].SuperAdmin && body.SuperAdmin != nil && !*body.SuperAdmin && h.countSuperAdmins() <= 1 {
+				return users.UserEntry{}, fuego.BadRequestError{Detail: "cannot demote the last super admin"}
+			}
 			if body.FirstName != nil {
 				h.users[i].FirstName = *body.FirstName
 			}
@@ -768,6 +848,15 @@ func (h *AdminRequesthandler) AddGroup(c fuego.ContextWithBody[addGroupRequest])
 		return users.UserGroup{}, fuego.BadRequestError{Detail: "name is required"}
 	}
 
+	// Only super admins may create groups that confer roles.
+	if len(body.Roles) > 0 {
+		callerID, _ := ginCtxBody(c).Get("user_identity")
+		cid, _ := callerID.(string)
+		if !h.IsSuperAdmin(cid) {
+			return users.UserGroup{}, fuego.ForbiddenError{Detail: "only a super admin can assign roles to a group"}
+		}
+	}
+
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -819,6 +908,15 @@ func (h *AdminRequesthandler) UpdateGroup(c fuego.ContextWithBody[updateGroupReq
 	body, err := c.Body()
 	if err != nil {
 		return users.UserGroup{}, fuego.BadRequestError{Detail: "invalid request body"}
+	}
+
+	// Only super admins may change the roles a group confers.
+	if len(body.Roles) > 0 {
+		callerID, _ := ginCtxBody(c).Get("user_identity")
+		cid, _ := callerID.(string)
+		if !h.IsSuperAdmin(cid) {
+			return users.UserGroup{}, fuego.ForbiddenError{Detail: "only a super admin can assign roles to a group"}
+		}
 	}
 
 	h.mu.Lock()

@@ -98,7 +98,9 @@ func generateCSRFToken() string {
 
 func setCSRFCookie(c *gin.Context) string {
 	token := generateCSRFToken()
-	c.SetCookie(csrfCookieName, token, 600, "/hydra", "", false, true)
+	secure := c.Request.TLS != nil || c.GetHeader("X-Forwarded-Proto") == "https"
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie(csrfCookieName, token, 600, "/hydra", "", secure, true)
 	return token
 }
 
@@ -118,6 +120,7 @@ type HydraLoginHandler struct {
 	httpClient *http.Client
 	limiter    *loginRateLimiter
 	signingKey []byte
+	signupMu   sync.Mutex // serializes first-user signup to prevent a race creating two super admins
 }
 
 // NewHydraLoginHandler creates a new handler for the Hydra login/consent flow.
@@ -276,6 +279,11 @@ func (h *HydraLoginHandler) LoginPost(c *gin.Context) {
 			c.String(http.StatusBadRequest, errorPage("Password must be at least 8 characters."))
 			return
 		}
+
+		// Serialize signup so concurrent requests cannot both pass the
+		// "no users exist" check and each create a super admin.
+		h.signupMu.Lock()
+		defer h.signupMu.Unlock()
 
 		// Only allow signup if no internal users exist yet.
 		users, err := h.store.Users.ListInternalUsers(ctx)
@@ -886,7 +894,7 @@ func errorPage(message string) string {
 <body>
 <div class="card">
   <h1 class="error">Error</h1>
-  <p>` + message + `</p>
+  <p>` + html.EscapeString(message) + `</p>
 </div>
 </body>
 </html>`

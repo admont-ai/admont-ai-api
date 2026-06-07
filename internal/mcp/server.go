@@ -75,8 +75,16 @@ type Server struct {
 	authCodes  sync.Map // code string → *authCodeEntry
 	authStates sync.Map // provider state string → *mcpAuthState
 
+	// Registered MCP OAuth clients (client_id → *mcpRegisteredClient)
+	registeredClients sync.Map
+
 	// Connected MCP sessions
 	mcpSessions sync.Map // sessionID string → *mcpClientSession
+}
+
+type mcpRegisteredClient struct {
+	RedirectURIs []string
+	CreatedAt    time.Time
 }
 
 // mcpClientSession tracks an active MCP client connection.
@@ -177,18 +185,36 @@ func (s *Server) RegisterRoutes(r *gin.Engine) {
 	mcp.POST("/token", s.oauthToken)
 	// SSE transport (auth required — returns 401 to trigger MCP OAuth flow)
 	mcp.GET("/sse", s.requireAuth, gin.WrapF(s.sseServer.ServeHTTP))
-	mcp.POST("/message", gin.WrapF(s.sseServer.ServeHTTP))
+	mcp.POST("/message", s.requireAuthMessage, gin.WrapF(s.sseServer.ServeHTTP))
+}
+
+// bearerToken extracts the JWT from the Authorization header or access_token query param.
+func bearerToken(c *gin.Context) string {
+	if h := c.GetHeader("Authorization"); strings.HasPrefix(h, "Bearer ") {
+		return strings.TrimPrefix(h, "Bearer ")
+	}
+	return c.Query("access_token")
+}
+
+// requireAuthMessage validates the JWT on a request without creating a session.
+// Used for the /mcp/message endpoint, which must not be reachable unauthenticated.
+func (s *Server) requireAuthMessage(c *gin.Context) {
+	token := bearerToken(c)
+	if token == "" {
+		s.sendUnauthorized(c)
+		return
+	}
+	if _, err := s.jwtService.ValidateToken(token); err != nil {
+		log.WithError(err).Warn("MCP: invalid or expired JWT on message")
+		s.sendUnauthorized(c)
+		return
+	}
+	c.Next()
 }
 
 // requireAuth rejects unauthenticated requests with 401 + WWW-Authenticate header.
 func (s *Server) requireAuth(c *gin.Context) {
-	token := ""
-	if h := c.GetHeader("Authorization"); strings.HasPrefix(h, "Bearer ") {
-		token = strings.TrimPrefix(h, "Bearer ")
-	}
-	if token == "" {
-		token = c.Query("access_token")
-	}
+	token := bearerToken(c)
 	if token == "" {
 		s.sendUnauthorized(c)
 		return
@@ -319,13 +345,29 @@ func (s *Server) oauthRegister(c *gin.Context) {
 	}
 	clientID := base64.RawURLEncoding.EncodeToString(b)
 
+	var redirectURIs []string
+	if uris, ok := req["redirect_uris"]; ok {
+		if uriList, ok := uris.([]any); ok {
+			for _, u := range uriList {
+				if s, ok := u.(string); ok {
+					redirectURIs = append(redirectURIs, s)
+				}
+			}
+		}
+	}
+
+	s.registeredClients.Store(clientID, &mcpRegisteredClient{
+		RedirectURIs: redirectURIs,
+		CreatedAt:    time.Now(),
+	})
+
 	resp := map[string]any{
 		"client_id":                  clientID,
 		"client_id_issued_at":        time.Now().Unix(),
 		"token_endpoint_auth_method": "none",
 	}
-	if uris, ok := req["redirect_uris"]; ok {
-		resp["redirect_uris"] = uris
+	if len(redirectURIs) > 0 {
+		resp["redirect_uris"] = redirectURIs
 	}
 	if name, ok := req["client_name"]; ok {
 		resp["client_name"] = name
@@ -334,7 +376,25 @@ func (s *Server) oauthRegister(c *gin.Context) {
 	c.JSON(http.StatusCreated, resp)
 }
 
+func (s *Server) validateClientRedirectURI(clientID, redirectURI string) bool {
+	if clientID == "" {
+		return false
+	}
+	val, ok := s.registeredClients.Load(clientID)
+	if !ok {
+		return false
+	}
+	client := val.(*mcpRegisteredClient)
+	for _, uri := range client.RedirectURIs {
+		if uri == redirectURI {
+			return true
+		}
+	}
+	return len(client.RedirectURIs) == 0
+}
+
 func (s *Server) oauthAuthorize(c *gin.Context) {
+	clientID := c.Query("client_id")
 	redirectURI := c.Query("redirect_uri")
 	state := c.Query("state")
 	codeChallenge := c.Query("code_challenge")
@@ -343,6 +403,10 @@ func (s *Server) oauthAuthorize(c *gin.Context) {
 
 	if redirectURI == "" || codeChallenge == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "redirect_uri and code_challenge are required"})
+		return
+	}
+	if !s.validateClientRedirectURI(clientID, redirectURI) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "redirect_uri not registered for this client"})
 		return
 	}
 	if codeChallengeMethod == "" {
@@ -531,7 +595,7 @@ func (s *Server) oauthToken(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"access_token": entry.JWT,
 		"token_type":   "Bearer",
-		"expires_in":   86400,
+		"expires_in":   3600,
 	})
 }
 
@@ -579,7 +643,17 @@ func (s *Server) canAccessRepo(repoSlug, identity string) bool {
 	if rc.PublicAccess {
 		return true
 	}
-	return identity != ""
+	if identity == "" {
+		return false
+	}
+	if identity != "" && s.isSystemAdmin != nil && s.isSystemAdmin(identity) {
+		return true
+	}
+	resolver := s.permResolvers[repoSlug]
+	if resolver == nil {
+		return true
+	}
+	return resolver.Check(identity, "/", permissions.Viewer)
 }
 
 func (s *Server) shouldIndex(repoSlug string) bool {

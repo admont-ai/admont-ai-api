@@ -190,7 +190,7 @@ func (h *LLMRequesthandler) doEdit(ctx context.Context, model, content, task, in
 
 func llmError(action string, err error) fuego.HTTPError {
 	log.WithError(err).WithField("action", action).Warn("LLM request failed")
-	return fuego.HTTPError{Detail: fmt.Sprintf("LLM %s failed: %v", action, err)}
+	return fuego.HTTPError{Detail: "LLM request failed"}
 }
 
 // parseEditResponse extracts the content and notes from a JSON response.

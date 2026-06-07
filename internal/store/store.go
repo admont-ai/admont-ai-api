@@ -36,6 +36,21 @@ type Store struct {
 	Conversations *ai_conversation.Store
 }
 
+// isValidIdentifier reports whether s is a safe Postgres identifier
+// (letters, digits, underscores, and hyphens only). Used to guard against
+// injection when a database/schema name must be interpolated into DDL.
+func isValidIdentifier(s string) bool {
+	if s == "" || len(s) > 63 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
 // EnsureDatabase creates the target database if it does not already exist.
 func EnsureDatabase(ctx context.Context, dsn string) error {
 	u, err := url.Parse(dsn)
@@ -46,6 +61,9 @@ func EnsureDatabase(ctx context.Context, dsn string) error {
 	dbName := strings.TrimPrefix(u.Path, "/")
 	if dbName == "" {
 		return nil
+	}
+	if !isValidIdentifier(dbName) {
+		return fmt.Errorf("invalid database name %q in DSN", dbName)
 	}
 
 	adminURL := *u

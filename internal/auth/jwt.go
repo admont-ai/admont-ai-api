@@ -2,6 +2,7 @@ package auth
 
 import (
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -26,6 +27,13 @@ type JWTService struct {
 	secret            []byte
 	expiration        time.Duration
 	refreshExpiration time.Duration
+
+	// invalidatedBefore tracks, per identity, a cutoff time before which all
+	// tokens are rejected. Used to invalidate sessions on password change.
+	// In-memory: a process restart clears it, but tokens expire within
+	// expiration/refreshExpiration anyway.
+	mu                sync.RWMutex
+	invalidatedBefore map[string]time.Time
 }
 
 func NewJWTService(secret string, expiration time.Duration) *JWTService {
@@ -33,7 +41,36 @@ func NewJWTService(secret string, expiration time.Duration) *JWTService {
 		secret:            []byte(secret),
 		expiration:        expiration,
 		refreshExpiration: 7 * 24 * time.Hour,
+		invalidatedBefore: make(map[string]time.Time),
 	}
+}
+
+// InvalidateSessions rejects all tokens for the given identity issued before now.
+// Call this when a user's password changes or credentials are otherwise revoked.
+func (s *JWTService) InvalidateSessions(identity string) {
+	if identity == "" {
+		return
+	}
+	s.mu.Lock()
+	s.invalidatedBefore[identity] = time.Now()
+	s.mu.Unlock()
+}
+
+// isInvalidated reports whether a token for identity issued at issuedAt has been
+// invalidated by a later InvalidateSessions call.
+func (s *JWTService) isInvalidated(identity string, issuedAt *jwt.NumericDate) bool {
+	if identity == "" || issuedAt == nil {
+		return false
+	}
+	s.mu.RLock()
+	cutoff, ok := s.invalidatedBefore[identity]
+	s.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	// JWT "iat" has one-second resolution, so reject any token issued in or
+	// before the cutoff second. A token minted in a later second is accepted.
+	return !issuedAt.Time.After(cutoff.Truncate(time.Second))
 }
 
 func (s *JWTService) GenerateToken(email, name, subject, provider string) (string, error) {
@@ -92,6 +129,9 @@ func (s *JWTService) ValidateToken(tokenString string) (*Claims, error) {
 	if !ok || !token.Valid {
 		return nil, errors.New("invalid token")
 	}
+	if s.isInvalidated(claims.Identity, claims.IssuedAt) {
+		return nil, errors.New("token invalidated")
+	}
 
 	return claims, nil
 }
@@ -113,6 +153,9 @@ func (s *JWTService) ValidateRefreshToken(tokenString string) (*RefreshClaims, e
 	}
 	if claims.Subject != "refresh" {
 		return nil, errors.New("not a refresh token")
+	}
+	if s.isInvalidated(claims.Identity, claims.IssuedAt) {
+		return nil, errors.New("token invalidated")
 	}
 
 	return claims, nil

@@ -1,24 +1,56 @@
 package auth
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"net/http"
 	"net/url"
 	"sort"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 )
 
-type Handler struct {
-	registry *Registry
-	jwt      *JWTService
+type authCodeStore struct {
+	Token        string
+	RefreshToken string
+	ExpiresAt    time.Time
 }
 
-func NewHandler(registry *Registry, jwt *JWTService) *Handler {
+type Handler struct {
+	registry       *Registry
+	jwt            *JWTService
+	allowedOrigins []string
+	authCodes      sync.Map
+}
+
+func NewHandler(registry *Registry, jwt *JWTService, allowedOrigins []string) *Handler {
 	return &Handler{
-		registry: registry,
-		jwt:      jwt,
+		registry:       registry,
+		jwt:            jwt,
+		allowedOrigins: allowedOrigins,
 	}
+}
+
+func (h *Handler) isAllowedRedirect(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	origin := strings.ToLower(u.Scheme + "://" + u.Host)
+	for _, allowed := range h.allowedOrigins {
+		ao, err := url.Parse(allowed)
+		if err != nil {
+			continue
+		}
+		if strings.ToLower(ao.Scheme+"://"+ao.Host) == origin {
+			return true
+		}
+	}
+	return false
 }
 
 type loginResponse struct {
@@ -42,6 +74,10 @@ func (h *Handler) Login(c *gin.Context) {
 	redirectURI := c.Query("redirect_uri")
 	if redirectURI == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "redirect_uri is required"})
+		return
+	}
+	if !h.isAllowedRedirect(redirectURI) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "redirect_uri origin not allowed"})
 		return
 	}
 
@@ -94,19 +130,51 @@ func (h *Handler) Callback(c *gin.Context) {
 		return
 	}
 
-	if frontendRedirect != "" {
+	if frontendRedirect != "" && h.isAllowedRedirect(frontendRedirect) {
 		u, err := url.Parse(frontendRedirect)
 		if err == nil {
-			q := u.Query()
-			q.Set("token", token)
-			q.Set("refresh_token", refreshToken)
-			u.RawQuery = q.Encode()
-			c.Redirect(http.StatusTemporaryRedirect, u.String())
-			return
+			codeBytes := make([]byte, 32)
+			if _, err := rand.Read(codeBytes); err == nil {
+				code := base64.RawURLEncoding.EncodeToString(codeBytes)
+				h.authCodes.Store(code, &authCodeStore{
+					Token:        token,
+					RefreshToken: refreshToken,
+					ExpiresAt:    time.Now().Add(30 * time.Second),
+				})
+				q := u.Query()
+				q.Set("code", code)
+				u.RawQuery = q.Encode()
+				c.Redirect(http.StatusTemporaryRedirect, u.String())
+				return
+			}
 		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"token": token, "refresh_token": refreshToken})
+}
+
+// Exchange trades a one-time code for tokens (used after OAuth redirect).
+func (h *Handler) Exchange(c *gin.Context) {
+	var body struct {
+		Code string `json:"code"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Code == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "code is required"})
+		return
+	}
+
+	val, ok := h.authCodes.LoadAndDelete(body.Code)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or expired code"})
+		return
+	}
+	entry := val.(*authCodeStore)
+	if time.Now().After(entry.ExpiresAt) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "code expired"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"token": entry.Token, "refresh_token": entry.RefreshToken})
 }
 
 // Refresh exchanges a valid refresh token for a new access token.

@@ -524,7 +524,7 @@ func (h *RepoRequesthandler) ListFiles(c fuego.ContextNoBody) (any, error) {
 	entries, err := backend.ListEntries(root)
 	if err != nil {
 		log.WithError(err).WithField("repo", repoName).Warn("failed to list files")
-		return nil, fuego.HTTPError{Detail: fmt.Sprintf("failed to list files: %v", err)}
+		return nil, fuego.HTTPError{Detail: "failed to list files"}
 	}
 
 	_, userEmail := getIdentity(gc)
@@ -858,7 +858,7 @@ func (h *RepoRequesthandler) CreateFile(c fuego.ContextWithBody[fileRequest]) (f
 
 	if err := backend.AddFile(subfolder, filename, []byte(body.Content)); err != nil {
 		log.WithError(err).WithField("repo", repoName).WithField("path", filePath).Warn("failed to create file")
-		return fileResponse{}, fuego.HTTPError{Detail: fmt.Sprintf("failed to create file: %v", err)}
+		return fileResponse{}, fuego.HTTPError{Detail: "failed to create file"}
 	}
 
 	backend.SaveChangesAsync("create "+filePath, userName, userEmail)
@@ -900,7 +900,7 @@ func (h *RepoRequesthandler) UpdateFile(c fuego.ContextWithBody[fileRequest]) (f
 
 	if err := backend.AddFile(subfolder, filename, []byte(body.Content)); err != nil {
 		log.WithError(err).WithField("repo", repoName).WithField("path", filePath).Warn("failed to update file")
-		return fileResponse{}, fuego.HTTPError{Detail: fmt.Sprintf("failed to update file: %v", err)}
+		return fileResponse{}, fuego.HTTPError{Detail: "failed to update file"}
 	}
 
 	backend.SaveChangesAsync("update "+filePath, userName, userEmail)
@@ -937,7 +937,7 @@ func (h *RepoRequesthandler) DeleteFile(c fuego.ContextNoBody) (any, error) {
 
 	if err := backend.DeleteFile(subfolder, filename); err != nil {
 		log.WithError(err).WithField("repo", repoName).WithField("path", filePath).Warn("failed to delete file")
-		return nil, fuego.HTTPError{Detail: fmt.Sprintf("failed to delete file: %v", err)}
+		return nil, fuego.HTTPError{Detail: "failed to delete file"}
 	}
 
 	// Remove permission entry
@@ -991,7 +991,7 @@ func (h *RepoRequesthandler) MoveFile(c fuego.ContextWithBody[fileMoveRequest]) 
 
 	if err := backend.MoveFile(oldSubfolder, filename, dest, filename); err != nil {
 		log.WithError(err).WithField("repo", repoName).WithField("path", filePath).Warn("failed to move file")
-		return fileResponse{}, fuego.HTTPError{Detail: fmt.Sprintf("failed to move file: %v", err)}
+		return fileResponse{}, fuego.HTTPError{Detail: "failed to move file"}
 	}
 
 	// Update permission entries
@@ -1044,7 +1044,7 @@ func (h *RepoRequesthandler) RenameFile(c fuego.ContextWithBody[fileRenameReques
 
 	if err := backend.MoveFile(subfolder, oldName, subfolder, body.Name); err != nil {
 		log.WithError(err).WithField("repo", repoName).WithField("path", filePath).Warn("failed to rename file")
-		return fileResponse{}, fuego.HTTPError{Detail: fmt.Sprintf("failed to rename file: %v", err)}
+		return fileResponse{}, fuego.HTTPError{Detail: "failed to rename file"}
 	}
 
 	// Update permission entries
@@ -1433,7 +1433,7 @@ func (h *RepoRequesthandler) CreateFolder(c fuego.ContextWithBody[folderRequest]
 
 	if err := backend.AddFile(subfolder, ".gitkeep", []byte{}); err != nil {
 		log.WithError(err).WithField("repo", repoName).WithField("folder", folderPath).Warn("failed to create folder")
-		return folderResponse{}, fuego.HTTPError{Detail: fmt.Sprintf("failed to create folder: %v", err)}
+		return folderResponse{}, fuego.HTTPError{Detail: "failed to create folder"}
 	}
 
 	backend.SaveChangesAsync("create folder "+subfolder, userName, userEmail)
@@ -1468,7 +1468,7 @@ func (h *RepoRequesthandler) UpdateFolder(c fuego.ContextWithBody[folderRequest]
 
 	if err := backend.RenameFolder(folderPath, newRelPath); err != nil {
 		log.WithError(err).WithField("repo", repoName).WithField("folder", folderPath).Warn("failed to rename folder")
-		return folderResponse{}, fuego.HTTPError{Detail: fmt.Sprintf("failed to rename folder: %v", err)}
+		return folderResponse{}, fuego.HTTPError{Detail: "failed to rename folder"}
 	}
 
 	// Update permission entries
@@ -1503,7 +1503,7 @@ func (h *RepoRequesthandler) DeleteFolder(c fuego.ContextNoBody) (any, error) {
 
 	if err := backend.DeleteFolder(folderPath); err != nil {
 		log.WithError(err).WithField("repo", repoName).WithField("folder", folderPath).Warn("failed to delete folder")
-		return nil, fuego.HTTPError{Detail: fmt.Sprintf("failed to delete folder: %v", err)}
+		return nil, fuego.HTTPError{Detail: "failed to delete folder"}
 	}
 
 	// Remove permission entries for folder and children
@@ -1553,7 +1553,7 @@ func (h *RepoRequesthandler) MoveFolder(c fuego.ContextWithBody[folderMoveReques
 
 	if err := backend.RenameFolder(folderPath, newRelPath); err != nil {
 		log.WithError(err).WithField("repo", repoName).WithField("folder", folderPath).Warn("failed to move folder")
-		return folderResponse{}, fuego.HTTPError{Detail: fmt.Sprintf("failed to move folder: %v", err)}
+		return folderResponse{}, fuego.HTTPError{Detail: "failed to move folder"}
 	}
 
 	// Update permission entries
@@ -1605,7 +1605,7 @@ func (h *RepoRequesthandler) SetOrder(c fuego.ContextWithBody[orderRequest]) (or
 	fullDir := filepath.Join(root, dirPath)
 
 	if err := backend.WriteOrder(fullDir, body.Order); err != nil {
-		return orderResponse{}, fuego.HTTPError{Detail: fmt.Sprintf("failed to write order: %v", err)}
+		return orderResponse{}, fuego.HTTPError{Detail: "failed to write order"}
 	}
 
 	commitPath := dirPath
@@ -1658,7 +1658,7 @@ func (h *RepoRequesthandler) SaveDraft(c fuego.ContextWithBody[draftRequest]) (f
 
 	if err := dm.SaveDraft(subfolder, filename, userEmail, userName, baseCommitHash, []byte(body.Content)); err != nil {
 		log.WithError(err).WithField("repo", repoName).WithField("path", filePath).Warn("failed to save draft")
-		return fileResponse{}, fuego.HTTPError{Detail: fmt.Sprintf("failed to save draft: %v", err)}
+		return fileResponse{}, fuego.HTTPError{Detail: "failed to save draft"}
 	}
 
 	meta, _ := dm.GetDraftMeta(subfolder, filename, userEmail)
@@ -1737,7 +1737,7 @@ func (h *RepoRequesthandler) PublishDraft(c fuego.ContextNoBody) (publishRespons
 	// Write the merged content to the actual file
 	if err := backend.AddFile(subfolder, filename, []byte(merged)); err != nil {
 		log.WithError(err).WithField("repo", repoName).WithField("path", filePath).Warn("failed to publish draft")
-		return publishResponse{}, fuego.HTTPError{Detail: fmt.Sprintf("failed to write file: %v", err)}
+		return publishResponse{}, fuego.HTTPError{Detail: "failed to write file"}
 	}
 
 	backend.SaveChangesAsync("publish draft "+filePath, userName, userEmail)
@@ -1784,7 +1784,7 @@ func (h *RepoRequesthandler) DiscardDraft(c fuego.ContextNoBody) (any, error) {
 
 	if err := dm.DeleteDraft(subfolder, filename, userEmail); err != nil {
 		log.WithError(err).WithField("repo", repoName).WithField("path", filePath).Warn("failed to discard draft")
-		return nil, fuego.HTTPError{Detail: fmt.Sprintf("failed to discard draft: %v", err)}
+		return nil, fuego.HTTPError{Detail: "failed to discard draft"}
 	}
 
 	return nil, nil
@@ -2100,14 +2100,14 @@ func (h *RepoRequesthandler) InitPermissions(c fuego.ContextWithBody[initPermiss
 
 	data, err := permissions.Marshal(resolver)
 	if err != nil {
-		return initPermissionsResponse{}, fuego.InternalServerError{Detail: fmt.Sprintf("failed to marshal permissions file: %v", err)}
+		return initPermissionsResponse{}, fuego.InternalServerError{Detail: "failed to marshal permissions file"}
 	}
 	if err := backend.AddFile("", permissions.PermissionsFileName, data); err != nil {
-		return initPermissionsResponse{}, fuego.InternalServerError{Detail: fmt.Sprintf("failed to save permissions file: %v", err)}
+		return initPermissionsResponse{}, fuego.InternalServerError{Detail: "failed to save permissions file"}
 	}
 
 	if err := backend.SaveChanges("initialize permissions", userName, userEmail); err != nil {
-		return initPermissionsResponse{}, fuego.InternalServerError{Detail: fmt.Sprintf("failed to push permissions: %v", err)}
+		return initPermissionsResponse{}, fuego.InternalServerError{Detail: "failed to push permissions"}
 	}
 
 	return initPermissionsResponse{

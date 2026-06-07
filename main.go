@@ -338,7 +338,7 @@ func main() {
 	}
 
 	jwtService := auth.NewJWTService(jwtSecret, 1*time.Hour)
-	authHandler := auth.NewHandler(httpRegistry, jwtService)
+	authHandler := auth.NewHandler(httpRegistry, jwtService, cfg.AllowedOrigins)
 
 	// --- Load users and groups from DB ---
 	users, err := db.Users.ListAllUsers(ctx)
@@ -485,8 +485,8 @@ func main() {
 	backendHolder := backend.NewHolder(nil)
 	searchIndexer := indexer.New(backendHolder, repoStateStore, backends, docPaths)
 	repoHandler.SetIndexer(searchIndexer)
-	searchHandler := requesthandler.NewSearchRequesthandler(backendHolder, repoStateStore, backends, repoConfigs)
-	ragHandler := requesthandler.NewRAGRequesthandler(llmClient, backendHolder, backends, repoConfigs)
+	searchHandler := requesthandler.NewSearchRequesthandler(backendHolder, repoStateStore, backends, repoConfigs, repoHandler.PermResolvers())
+	ragHandler := requesthandler.NewRAGRequesthandler(llmClient, backendHolder, backends, repoConfigs, repoHandler.PermResolvers())
 
 	summarizer := llm.NewSummarizer(llmClient, db.Conversations)
 	ragHandler.SetConversationStore(db.Conversations, summarizer)
@@ -538,6 +538,18 @@ func main() {
 	gin.DebugPrintRouteFunc = func(string, string, string, int) {}
 
 	r := gin.New()
+	// Trusted proxies govern whether client-supplied X-Forwarded-For / -Proto
+	// headers are honored. Trusting all proxies (the Gin default) lets clients
+	// spoof their IP and bypass IP-based rate limiting and login brute-force
+	// protection. Default to trusting none; deployments behind a known reverse
+	// proxy must set trusted_proxies explicitly.
+	if len(cfg.TrustedProxies) > 0 {
+		if err := r.SetTrustedProxies(cfg.TrustedProxies); err != nil {
+			log.WithError(err).Fatal("invalid trusted_proxies configuration")
+		}
+	} else {
+		_ = r.SetTrustedProxies(nil)
+	}
 	r.Use(gin.RecoveryWithWriter(log.StandardLogger().WriterLevel(log.ErrorLevel)))
 	r.Use(ginLogrus())
 
@@ -566,7 +578,9 @@ func main() {
 	authGroup.GET("/login", authHandler.Login)
 	authGroup.GET("/callback", authHandler.Callback)
 	authGroup.GET("/providers", authHandler.Providers)
-	authGroup.POST("/refresh", authHandler.Refresh)
+	refreshLimiter := middleware.NewRateLimiter(20)
+	authGroup.POST("/refresh", middleware.RateLimit(refreshLimiter), authHandler.Refresh)
+	authGroup.POST("/exchange", authHandler.Exchange)
 
 	// Hydra login/consent flow (only when Hydra is enabled)
 	if cfg.InternalAuth.Enabled {
@@ -603,6 +617,8 @@ func main() {
 		cancel()
 		log.Info("LLM providers reloaded")
 	})
+
+	adminHandler.SetSessionInvalidator(jwtService.InvalidateSessions)
 
 	// Wire up system admin check for file permissions
 	repoHandler.SetSystemAdminCheck(adminHandler.CanManageRepos)
@@ -704,6 +720,13 @@ func main() {
 			return changePasswordResponse{}, fmt.Errorf("internal error")
 		}
 		_ = db.Users.ClearPasswordExpired(ctx, userEmail)
+		// Invalidate all existing access/refresh tokens for this user so a
+		// previously-issued (or stolen) token cannot outlive the password change.
+		if id, ok := gc.Get(middleware.CtxUserIdentity); ok {
+			if identity, ok := id.(string); ok {
+				jwtService.InvalidateSessions(identity)
+			}
+		}
 		return changePasswordResponse{Message: "password changed successfully"}, nil
 	},
 		fuego.OptionTags("User"),
@@ -1323,7 +1346,9 @@ func main() {
 		fuego.OptionSummary("Remove a search provider"),
 	)
 	// Search routes (always registered; returns 503 when no backend is active)
-	fuegogin.Post(engine, repos, "/search", searchHandler.Search,
+	searchRateLimiter := middleware.NewRateLimiter(60)
+	searchGroup := repos.Group("", middleware.RateLimit(searchRateLimiter))
+	fuegogin.Post(engine, searchGroup, "/search", searchHandler.Search,
 		fuego.OptionTags("Search"),
 		fuego.OptionSummary("Search documents"),
 	)
@@ -1331,7 +1356,7 @@ func main() {
 		fuego.OptionTags("Search"),
 		fuego.OptionSummary("Search index status"),
 	)
-	fuegogin.Post(engine, repos, "/rag", ragHandler.RAG,
+	fuegogin.Post(engine, searchGroup, "/rag", ragHandler.RAG,
 		fuego.OptionTags("RAG"),
 		fuego.OptionSummary("Retrieval-augmented generation Q&A"),
 	)

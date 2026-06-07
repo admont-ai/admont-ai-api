@@ -8,6 +8,53 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestJWTService_InvalidateSessions(t *testing.T) {
+	svc := NewJWTService("test-secret-key", time.Hour)
+
+	token, err := svc.GenerateToken("alice@example.com", "Alice", "", "internal")
+	require.NoError(t, err)
+
+	// Token is valid before invalidation.
+	_, err = svc.ValidateToken(token)
+	require.NoError(t, err)
+
+	// Sleep so the invalidation cutoff is strictly after the token's issued-at.
+	time.Sleep(1100 * time.Millisecond)
+	svc.InvalidateSessions("internal:alice@example.com")
+
+	// Token is now rejected.
+	_, err = svc.ValidateToken(token)
+	assert.Error(t, err)
+
+	// A token for a different identity is unaffected.
+	other, err := svc.GenerateToken("bob@example.com", "Bob", "", "internal")
+	require.NoError(t, err)
+	_, err = svc.ValidateToken(other)
+	assert.NoError(t, err)
+
+	// A token minted in a later second is accepted (iat has 1s resolution).
+	time.Sleep(1100 * time.Millisecond)
+	fresh, err := svc.GenerateToken("alice@example.com", "Alice", "", "internal")
+	require.NoError(t, err)
+	_, err = svc.ValidateToken(fresh)
+	assert.NoError(t, err)
+}
+
+func TestJWTService_InvalidateSessions_RefreshToken(t *testing.T) {
+	svc := NewJWTService("secret", time.Hour)
+
+	rt, err := svc.GenerateRefreshToken("alice@example.com", "internal")
+	require.NoError(t, err)
+	_, err = svc.ValidateRefreshToken(rt)
+	require.NoError(t, err)
+
+	time.Sleep(1100 * time.Millisecond)
+	svc.InvalidateSessions("internal:alice@example.com")
+
+	_, err = svc.ValidateRefreshToken(rt)
+	assert.Error(t, err, "refresh token must be revoked on password change")
+}
+
 func TestJWTService_GenerateAndValidate(t *testing.T) {
 	svc := NewJWTService("test-secret-key", time.Hour)
 

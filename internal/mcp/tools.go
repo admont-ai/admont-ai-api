@@ -897,11 +897,17 @@ func (s *Server) deleteDraft(ctx context.Context, req mcplib.CallToolRequest) (*
 	if identity == "" {
 		return mcplib.NewToolResultError("authentication required"), nil
 	}
+	if !s.canAccessRepo(repo, identity) {
+		return mcplib.NewToolResultError("repository not found"), nil
+	}
 	dm, ok := s.draftManagers[repo]
 	if !ok {
 		return mcplib.NewToolResultError("drafts not available for this repository"), nil
 	}
 	subfolder, filename := splitPath(path)
+	if err := s.checkPermission(repo, identity, path, permissions.Contributor); err != nil {
+		return mcplib.NewToolResultError("not found"), nil
+	}
 	if !dm.HasDraft(subfolder, filename, identity) {
 		return mcplib.NewToolResultError("no draft found"), nil
 	}
@@ -975,5 +981,13 @@ func (s *Server) searchStatus(ctx context.Context, req mcplib.CallToolRequest) (
 	if err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("failed to get status: %v", err)), nil
 	}
-	return jsonResult(map[string]any{"repos": states}), nil
+	// Only expose status for repos the caller can access.
+	identity := getUserIdentity(ctx)
+	filtered := states[:0]
+	for _, st := range states {
+		if s.canAccessRepo(st.RepoSlug, identity) {
+			filtered = append(filtered, st)
+		}
+	}
+	return jsonResult(map[string]any{"repos": filtered}), nil
 }
