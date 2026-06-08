@@ -17,29 +17,6 @@ services:
       timeout: 5s
       retries: 5
 
-  hydra:
-    image: oryd/hydra:v2.3.0
-    container_name: admont-ai-hydra
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      DSN: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/admont-ai?sslmode=disable&search_path=hydra
-      URLS_SELF_ISSUER: http://localhost:4444
-      URLS_LOGIN: http://localhost:8080/hydra/login
-      URLS_CONSENT: http://localhost:8080/hydra/consent
-      URLS_LOGOUT: http://localhost:8080/hydra/logout
-      SECRETS_SYSTEM: ${HYDRA_SECRETS_SYSTEM:?Set HYDRA_SECRETS_SYSTEM in .env}
-      SERVE_PUBLIC_CORS_ENABLED: "true"
-      SERVE_PUBLIC_CORS_ALLOWED_ORIGINS: http://localhost:5173
-      SERVE_ADMIN_CORS_ENABLED: "true"
-      LOG_LEVEL: info
-    ports:
-      - "4444:4444"
-      - "4445:4445"
-    entrypoint: ["sh", "-c", "hydra migrate sql -e --yes && hydra serve all --dev"]
-    restart: unless-stopped
-
   languagetool:
     image: erikvl87/languagetool
     container_name: admont-ai-languagetool

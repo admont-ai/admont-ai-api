@@ -24,14 +24,16 @@ type Handler struct {
 	registry       *Registry
 	jwt            *JWTService
 	allowedOrigins []string
+	authn          *Authenticator
 	authCodes      sync.Map
 }
 
-func NewHandler(registry *Registry, jwt *JWTService, allowedOrigins []string) *Handler {
+func NewHandler(registry *Registry, jwt *JWTService, allowedOrigins []string, authn *Authenticator) *Handler {
 	return &Handler{
 		registry:       registry,
 		jwt:            jwt,
 		allowedOrigins: allowedOrigins,
+		authn:          authn,
 	}
 }
 

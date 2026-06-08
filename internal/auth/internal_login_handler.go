@@ -1,0 +1,171 @@
+package auth
+
+import (
+	"net/http"
+	"strings"
+
+	"github.com/christianfischer/md-wiki-server/internal/store/users"
+	"github.com/gin-gonic/gin"
+	log "github.com/sirupsen/logrus"
+)
+
+// displayName builds a human-friendly name from a user, falling back to email.
+func displayName(u *users.UserEntry, email string) string {
+	parts := make([]string, 0, 2)
+	if u != nil && u.FirstName != "" {
+		parts = append(parts, u.FirstName)
+	}
+	if u != nil && u.LastName != "" {
+		parts = append(parts, u.LastName)
+	}
+	if len(parts) == 0 {
+		return email
+	}
+	return strings.Join(parts, " ")
+}
+
+// issueTokens mints an access + refresh token for an internal user and writes
+// the JSON response.
+func (h *Handler) issueTokens(c *gin.Context, email, name string) {
+	token, err := h.jwt.GenerateToken(email, name, "", "internal")
+	if err != nil {
+		log.WithError(err).Error("failed to generate JWT")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
+		return
+	}
+	refresh, err := h.jwt.GenerateRefreshToken(email, "internal")
+	if err != nil {
+		log.WithError(err).Error("failed to generate refresh token")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"token": token, "refresh_token": refresh})
+}
+
+// InternalLogin authenticates an internal user with email + password.
+// If 2FA is enabled it returns {totp_required:true, pending_token}; otherwise
+// it returns {token, refresh_token}.
+func (h *Handler) InternalLogin(c *gin.Context) {
+	if h.authn == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "internal auth disabled"})
+		return
+	}
+	var body struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Email == "" || body.Password == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "email and password are required"})
+		return
+	}
+
+	ip := c.ClientIP()
+	if h.authn.Blocked(ip) {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many failed attempts; try again later"})
+		return
+	}
+
+	user, err := h.authn.VerifyPassword(c.Request.Context(), ip, body.Email, body.Password)
+	if err != nil {
+		switch err {
+		case ErrInvalidCredentials:
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid email or password"})
+		case ErrAccountSuspended:
+			c.JSON(http.StatusForbidden, gin.H{"error": "account suspended"})
+		default:
+			log.WithError(err).Error("internal login failed")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		}
+		return
+	}
+
+	if user.TOTPEnabled {
+		c.JSON(http.StatusOK, gin.H{"totp_required": true, "pending_token": h.authn.CreatePendingToken(body.Email)})
+		return
+	}
+	h.issueTokens(c, body.Email, displayName(user, body.Email))
+}
+
+// InternalTOTP completes a login by verifying a TOTP or recovery code against
+// a pending token issued by InternalLogin.
+func (h *Handler) InternalTOTP(c *gin.Context) {
+	if h.authn == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "internal auth disabled"})
+		return
+	}
+	var body struct {
+		PendingToken string `json:"pending_token"`
+		Code         string `json:"code"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.PendingToken == "" || body.Code == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "pending_token and code are required"})
+		return
+	}
+
+	ip := c.ClientIP()
+	if h.authn.Blocked(ip) {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many failed attempts; try again later"})
+		return
+	}
+
+	email, err := h.authn.ValidatePendingToken(body.PendingToken)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "session expired; please log in again"})
+		return
+	}
+	if err := h.authn.VerifyTOTP(c.Request.Context(), ip, email, body.Code); err != nil {
+		if err == ErrInvalidTOTP || err == ErrPendingToken {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid code"})
+			return
+		}
+		log.WithError(err).Error("TOTP verification failed")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+
+	user, _ := h.authn.store.Users.GetInternalUser(c.Request.Context(), email)
+	h.issueTokens(c, email, displayName(user, email))
+}
+
+// InternalSignup creates the first internal user (super admin) and logs them in.
+// Only available while no internal users exist.
+func (h *Handler) InternalSignup(c *gin.Context) {
+	if h.authn == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "internal auth disabled"})
+		return
+	}
+	var body struct {
+		Email     string `json:"email"`
+		Password  string `json:"password"`
+		FirstName string `json:"first_name"`
+		LastName  string `json:"last_name"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Email == "" || body.Password == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "email and password are required"})
+		return
+	}
+
+	err := h.authn.Signup(c.Request.Context(), body.Email, body.Password, body.FirstName, body.LastName)
+	switch err {
+	case nil:
+		log.WithField("identity", "internal:"+body.Email).Info("first internal user created")
+		h.issueTokens(c, body.Email, displayName(&users.UserEntry{FirstName: body.FirstName, LastName: body.LastName}, body.Email))
+	case ErrWeakPassword:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "password must be at least 8 characters"})
+	case ErrSignupClosed:
+		c.JSON(http.StatusForbidden, gin.H{"error": "signup is no longer available; ask an administrator to add your account"})
+	default:
+		log.WithError(err).Error("internal signup failed")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+	}
+}
+
+// InternalSignupStatus reports whether first-user signup is still open, so the
+// SPA can show a signup vs. login screen.
+func (h *Handler) InternalSignupStatus(c *gin.Context) {
+	if h.authn == nil {
+		c.JSON(http.StatusOK, gin.H{"signup_open": false, "enabled": false})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"signup_open": h.authn.SignupOpen(c.Request.Context()), "enabled": true})
+}

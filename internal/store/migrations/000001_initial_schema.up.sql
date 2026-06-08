@@ -55,54 +55,6 @@ CREATE TABLE search_providers (
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE internal_users (
-    id            SERIAL PRIMARY KEY,
-    email         TEXT NOT NULL UNIQUE,
-    first_name    TEXT NOT NULL DEFAULT '',
-    last_name     TEXT NOT NULL DEFAULT '',
-    super_admin   BOOLEAN NOT NULL DEFAULT FALSE,
-    roles         user_role[] NOT NULL DEFAULT '{}',
-    password_hash    TEXT NOT NULL DEFAULT '',
-    password_expired   BOOLEAN NOT NULL DEFAULT FALSE,
-    suspended          BOOLEAN NOT NULL DEFAULT FALSE,
-    password_changed_at TIMESTAMPTZ,
-    totp_secret        TEXT NOT NULL DEFAULT '',
-    totp_enabled       BOOLEAN NOT NULL DEFAULT FALSE,
-    totp_recovery_codes TEXT[] NOT NULL DEFAULT '{}',
-    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE external_users (
-    id            SERIAL PRIMARY KEY,
-    provider_id   INTEGER NOT NULL REFERENCES auth_providers(id),
-    email         TEXT NOT NULL,
-    first_name    TEXT NOT NULL DEFAULT '',
-    last_name     TEXT NOT NULL DEFAULT '',
-    super_admin   BOOLEAN NOT NULL DEFAULT FALSE,
-    roles         user_role[] NOT NULL DEFAULT '{}',
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (provider_id, email)
-);
-
-CREATE TABLE user_groups (
-    id          SERIAL PRIMARY KEY,
-    name        TEXT NOT NULL UNIQUE,
-    description TEXT NOT NULL DEFAULT '',
-    roles       user_role[] NOT NULL DEFAULT '{}',
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE user_group_members (
-    group_id      INTEGER NOT NULL REFERENCES user_groups(id) ON DELETE CASCADE,
-    user_id       INTEGER NOT NULL,
-    internal_user BOOLEAN NOT NULL,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (group_id, user_id, internal_user)
-);
-
 CREATE TABLE git_repos (
     id                 SERIAL PRIMARY KEY,
     slug               TEXT NOT NULL UNIQUE,
@@ -130,17 +82,87 @@ CREATE TABLE git_repos (
 
 -- Repo indexing state (lives in main DB so it survives backend switches).
 CREATE TABLE search_repo_state (
-    repo_slug         TEXT PRIMARY KEY,
-    last_indexed_sha  TEXT NOT NULL DEFAULT '',
-    total_chunks      INT NOT NULL DEFAULT 0,
-    last_indexed_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    repo_slug        TEXT PRIMARY KEY,
+    last_indexed_sha TEXT NOT NULL DEFAULT '',
+    total_chunks     INT NOT NULL DEFAULT 0,
+    last_indexed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Unified users table for both internal (password) and external (IdP) users.
+CREATE TABLE users (
+    id          SERIAL PRIMARY KEY,
+    provider    TEXT NOT NULL,              -- "internal" or the external IdP name
+    email       TEXT NOT NULL,
+    first_name  TEXT NOT NULL DEFAULT '',
+    last_name   TEXT NOT NULL DEFAULT '',
+    super_admin BOOLEAN NOT NULL DEFAULT FALSE,
+    roles       user_role[] NOT NULL DEFAULT '{}',
+    suspended   BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (provider, email)
+);
+
+-- Credentials are 0..1 per user; only internal users have a row.
+CREATE TABLE credentials (
+    user_id             INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    password_hash       TEXT NOT NULL DEFAULT '',
+    password_expired    BOOLEAN NOT NULL DEFAULT FALSE,
+    password_changed_at TIMESTAMPTZ,
+    totp_secret         TEXT NOT NULL DEFAULT '',
+    totp_enabled        BOOLEAN NOT NULL DEFAULT FALSE,
+    totp_recovery_codes TEXT[] NOT NULL DEFAULT '{}',
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE user_groups (
+    id          SERIAL PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    roles       user_role[] NOT NULL DEFAULT '{}',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE user_group_members (
+    group_id   INTEGER NOT NULL REFERENCES user_groups(id) ON DELETE CASCADE,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (group_id, user_id)
+);
+
+CREATE TABLE ai_conversations (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_email  TEXT NOT NULL,
+    title       TEXT NOT NULL DEFAULT '',
+    scope       TEXT NOT NULL DEFAULT 'all',
+    repo_slug   TEXT NOT NULL DEFAULT '',
+    file_path   TEXT NOT NULL DEFAULT '',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE ai_messages (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    conversation_id UUID NOT NULL REFERENCES ai_conversations(id) ON DELETE CASCADE,
+    role            TEXT NOT NULL,
+    content         TEXT NOT NULL,
+    sources         JSONB,
+    token_usage     JSONB,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Indexes.
+CREATE INDEX idx_ai_conversations_user ON ai_conversations (user_email, updated_at DESC);
+CREATE INDEX idx_ai_messages_conversation ON ai_messages (conversation_id, created_at ASC);
+
+-- updated_at triggers.
 CREATE TRIGGER trg_settings_updated_at BEFORE UPDATE ON settings FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 CREATE TRIGGER trg_auth_providers_updated_at BEFORE UPDATE ON auth_providers FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 CREATE TRIGGER trg_llm_providers_updated_at BEFORE UPDATE ON llm_providers FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 CREATE TRIGGER trg_search_providers_updated_at BEFORE UPDATE ON search_providers FOR EACH ROW EXECUTE FUNCTION update_updated_at();
-CREATE TRIGGER trg_internal_users_updated_at BEFORE UPDATE ON internal_users FOR EACH ROW EXECUTE FUNCTION update_updated_at();
-CREATE TRIGGER trg_external_users_updated_at BEFORE UPDATE ON external_users FOR EACH ROW EXECUTE FUNCTION update_updated_at();
-CREATE TRIGGER trg_user_groups_updated_at BEFORE UPDATE ON user_groups FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 CREATE TRIGGER trg_git_repos_updated_at BEFORE UPDATE ON git_repos FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+CREATE TRIGGER trg_users_updated_at BEFORE UPDATE ON users FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+CREATE TRIGGER trg_credentials_updated_at BEFORE UPDATE ON credentials FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+CREATE TRIGGER trg_user_groups_updated_at BEFORE UPDATE ON user_groups FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+CREATE TRIGGER trg_ai_conversations_updated_at BEFORE UPDATE ON ai_conversations FOR EACH ROW EXECUTE FUNCTION update_updated_at();

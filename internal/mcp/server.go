@@ -69,6 +69,7 @@ type Server struct {
 
 	jwtService *auth.JWTService
 	registry   *auth.Registry
+	authn      *auth.Authenticator
 	baseURL    string
 
 	// MCP OAuth: authorization codes and pending auth states
@@ -162,6 +163,12 @@ func (s *Server) SetSystemAdminCheck(fn func(string) bool) {
 	s.isSystemAdmin = fn
 }
 
+// SetAuthenticator enables native internal-user login (password + TOTP) for the
+// MCP browser OAuth flow, removing the dependency on an external IdP.
+func (s *Server) SetAuthenticator(a *auth.Authenticator) {
+	s.authn = a
+}
+
 func (s *Server) SetIndexer(idx *indexer.Indexer) {
 	s.idx = idx
 }
@@ -181,6 +188,7 @@ func (s *Server) RegisterRoutes(r *gin.Engine) {
 	// OAuth endpoints
 	mcp.POST("/register", s.oauthRegister)
 	mcp.GET("/authorize", s.oauthAuthorize)
+	mcp.POST("/login", s.mcpLogin)
 	mcp.GET("/callback", s.oauthCallback)
 	mcp.POST("/token", s.oauthToken)
 	// SSE transport (auth required — returns 401 to trigger MCP OAuth flow)
@@ -413,23 +421,48 @@ func (s *Server) oauthAuthorize(c *gin.Context) {
 		codeChallengeMethod = "S256"
 	}
 
-	// If no provider specified, let the user choose (or auto-select if only one).
+	params := mcpAuthParams{
+		ClientID:            clientID,
+		RedirectURI:         redirectURI,
+		State:               state,
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: codeChallengeMethod,
+	}
+
+	// Build the available provider list: native internal login (if enabled)
+	// plus any external IdP providers registered in the registry.
+	external := s.registry.Names()
+	sort.Strings(external)
+	var choices []string
+	if s.authn != nil {
+		choices = append(choices, "internal")
+	}
+	choices = append(choices, external...)
+
 	if provider == "" {
-		names := s.registry.Names()
-		sort.Strings(names)
-		if len(names) == 0 {
+		switch len(choices) {
+		case 0:
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "no auth providers configured"})
 			return
-		}
-		if len(names) == 1 {
-			provider = names[0]
-		} else {
-			s.renderProviderChooser(c, names)
+		case 1:
+			provider = choices[0]
+		default:
+			s.renderProviderChooser(c, params, choices)
 			return
 		}
 	}
 
-	// Start OAuth flow via registry
+	// Native internal login (password + TOTP) — no external IdP round-trip.
+	if provider == "internal" {
+		if s.authn == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal auth not available"})
+			return
+		}
+		renderNativeLoginPage(c, params, "")
+		return
+	}
+
+	// Start OAuth flow via registry (external IdP)
 	providerAuthURL, providerState, err := s.registry.GenerateAuthURL(provider, "")
 	if err != nil {
 		log.WithError(err).Error("MCP: failed to generate auth URL")
@@ -452,16 +485,20 @@ func (s *Server) oauthAuthorize(c *gin.Context) {
 
 // renderProviderChooser shows an HTML page letting the user pick an auth provider.
 // It preserves all original query parameters and adds the selected provider.
-func (s *Server) renderProviderChooser(c *gin.Context, providers []string) {
+func (s *Server) renderProviderChooser(c *gin.Context, _ mcpAuthParams, providers []string) {
 	// Build buttons that re-submit to the same endpoint with ?provider=name added.
 	var buttons strings.Builder
 	for _, p := range providers {
 		q := c.Request.URL.Query()
 		q.Set("provider", p)
 		href := "/mcp/authorize?" + q.Encode()
+		label := auth.ProviderDisplayName(p)
+		if p == "internal" {
+			label = "Internal Account"
+		}
 		fmt.Fprintf(&buttons,
 			`<a href="%s" class="btn">%s</a>`,
-			href, auth.ProviderDisplayName(p),
+			href, label,
 		)
 	}
 
@@ -508,21 +545,23 @@ func (s *Server) oauthCallback(c *gin.Context) {
 		return
 	}
 
-	// Map "hydra" provider to "internal" so the JWT identity matches internal user identities.
-	provider := userInfo.Provider
-	if provider == "hydra" {
-		provider = "internal"
-	}
+	s.issueMCPCode(c, mcpState.ClientRedirectURI, mcpState.ClientState,
+		mcpState.CodeChallenge, mcpState.CodeChallengeMethod,
+		userInfo.Email, userInfo.Name, userInfo.Subject, userInfo.Provider)
+}
 
-	// Generate our JWT
-	jwt, err := s.jwtService.GenerateToken(userInfo.Email, userInfo.Name, userInfo.Subject, provider)
+// issueMCPCode mints the app JWT for the authenticated user, stores it under a
+// fresh single-use authorization code, and redirects the browser back to the
+// MCP client's redirect_uri with that code. Shared by the native and external
+// (registry) authorization paths.
+func (s *Server) issueMCPCode(c *gin.Context, redirectURI, clientState, codeChallenge, codeChallengeMethod, email, name, subject, provider string) {
+	jwt, err := s.jwtService.GenerateToken(email, name, subject, provider)
 	if err != nil {
 		log.WithError(err).Error("MCP OAuth: failed to generate JWT")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
 		return
 	}
 
-	// Issue an authorization code for the MCP client
 	codeBytes := make([]byte, 32)
 	if _, err := rand.Read(codeBytes); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
@@ -532,21 +571,20 @@ func (s *Server) oauthCallback(c *gin.Context) {
 
 	s.authCodes.Store(authCode, &authCodeEntry{
 		JWT:                 jwt,
-		CodeChallenge:       mcpState.CodeChallenge,
-		CodeChallengeMethod: mcpState.CodeChallengeMethod,
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: codeChallengeMethod,
 		ExpiresAt:           time.Now().Add(5 * time.Minute),
 	})
 
-	// Redirect back to the MCP client's redirect_uri with the authorization code
-	u, err := url.Parse(mcpState.ClientRedirectURI)
+	u, err := url.Parse(redirectURI)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid redirect_uri"})
 		return
 	}
 	q := u.Query()
 	q.Set("code", authCode)
-	if mcpState.ClientState != "" {
-		q.Set("state", mcpState.ClientState)
+	if clientState != "" {
+		q.Set("state", clientState)
 	}
 	u.RawQuery = q.Encode()
 	c.Redirect(http.StatusTemporaryRedirect, u.String())

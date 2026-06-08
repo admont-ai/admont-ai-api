@@ -11,7 +11,7 @@ func TestIsAllowedRedirect(t *testing.T) {
 	h := NewHandler(NewRegistry(), NewJWTService("secret", time.Hour), []string{
 		"http://localhost:5173",
 		"https://app.example.com",
-	})
+	}, nil)
 
 	tests := []struct {
 		name    string
@@ -37,7 +37,7 @@ func TestIsAllowedRedirect(t *testing.T) {
 }
 
 func TestExchange_ValidCode(t *testing.T) {
-	h := NewHandler(NewRegistry(), NewJWTService("secret", time.Hour), nil)
+	h := NewHandler(NewRegistry(), NewJWTService("secret", time.Hour), nil, nil)
 
 	h.authCodes.Store("test-code", &authCodeStore{
 		Token:        "jwt-token",
@@ -57,7 +57,7 @@ func TestExchange_ValidCode(t *testing.T) {
 }
 
 func TestExchange_ExpiredCode(t *testing.T) {
-	h := NewHandler(NewRegistry(), NewJWTService("secret", time.Hour), nil)
+	h := NewHandler(NewRegistry(), NewJWTService("secret", time.Hour), nil, nil)
 
 	h.authCodes.Store("expired-code", &authCodeStore{
 		Token:        "jwt-token",

@@ -9,7 +9,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"image/png"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -106,69 +105,6 @@ func ginLogrus() gin.HandlerFunc {
 		} else {
 			entry.Info("request")
 		}
-	}
-}
-
-// setupHydra registers Hydra as an internal auth provider in both registries.
-func setupHydra(ctx context.Context, db *store.Store, cfg *config.Config, httpCallbackURL, mcpCallbackURL string, httpRegistry, mcpRegistry *auth.Registry) error {
-	hydraClientID, _ := db.GetSetting(ctx, "hydra_client_id")
-	hydraClientSecret, _ := db.GetEncryptedSetting(ctx, "hydra_client_secret")
-
-	redirectURIs := []string{httpCallbackURL, mcpCallbackURL}
-	hydraClient, err := auth.EnsureHydraClient(ctx, cfg.InternalAuth.AdminURL, hydraClientID, hydraClientSecret, redirectURIs)
-	if err != nil {
-		return err
-	}
-
-	// Persist client credentials if newly created.
-	if hydraClientID != hydraClient.ClientID {
-		_ = db.SetSetting(ctx, "hydra_client_id", hydraClient.ClientID)
-	}
-	if hydraClientSecret != hydraClient.ClientSecret && hydraClient.ClientSecret != "" {
-		_ = db.SetEncryptedSetting(ctx, "hydra_client_secret", hydraClient.ClientSecret)
-		hydraClientSecret = hydraClient.ClientSecret
-	}
-	if hydraClientSecret == "" {
-		hydraClientSecret, _ = db.GetEncryptedSetting(ctx, "hydra_client_secret")
-	}
-
-	httpHydra, err := auth.NewHydraProvider(cfg.InternalAuth.PublicURL, hydraClient.ClientID, hydraClientSecret, httpCallbackURL)
-	if err != nil {
-		return fmt.Errorf("creating Hydra HTTP provider: %w", err)
-	}
-	httpRegistry.Register(httpHydra)
-
-	mcpHydra, err := auth.NewHydraProvider(cfg.InternalAuth.PublicURL, hydraClient.ClientID, hydraClientSecret, mcpCallbackURL)
-	if err != nil {
-		return fmt.Errorf("creating Hydra MCP provider: %w", err)
-	}
-	mcpRegistry.Register(mcpHydra)
-
-	log.Info("Hydra internal auth provider configured")
-	return nil
-}
-
-// retryHydraSetup retries Hydra registration in the background until it succeeds.
-func retryHydraSetup(db *store.Store, cfg *config.Config, httpCallbackURL, mcpCallbackURL string, httpRegistry, mcpRegistry *auth.Registry) {
-	delays := []time.Duration{10 * time.Second, 15 * time.Second, 30 * time.Second, 60 * time.Second}
-	for i, delay := range delays {
-		time.Sleep(delay)
-		ctx := context.Background()
-		if err := setupHydra(ctx, db, cfg, httpCallbackURL, mcpCallbackURL, httpRegistry, mcpRegistry); err != nil {
-			log.WithError(err).WithField("attempt", i+2).Warn("Hydra still not ready")
-			continue
-		}
-		return
-	}
-	// Keep retrying every 60s indefinitely.
-	for {
-		time.Sleep(60 * time.Second)
-		ctx := context.Background()
-		if err := setupHydra(ctx, db, cfg, httpCallbackURL, mcpCallbackURL, httpRegistry, mcpRegistry); err != nil {
-			log.WithError(err).Warn("Hydra still not ready")
-			continue
-		}
-		return
 	}
 }
 
@@ -294,19 +230,8 @@ func main() {
 	httpRegistry := auth.NewRegistry()
 	mcpRegistry := auth.NewRegistry()
 
-	// Register Hydra as the internal auth provider directly from service config.
-	if cfg.InternalAuth.Enabled {
-		if cfg.InternalAuth.PublicURL == "" || cfg.InternalAuth.AdminURL == "" {
-			log.Fatal("internal_auth.public_url and internal_auth.admin_url must be set when internal_auth.enabled is true")
-		}
-
-		if err := setupHydra(ctx, db, cfg, httpCallbackURL, mcpCallbackURL, httpRegistry, mcpRegistry); err != nil {
-			// Non-fatal: start without internal auth, retry in background.
-			log.WithError(err).Warn("Hydra not ready — internal auth disabled, retrying in background")
-			go retryHydraSetup(db, cfg, httpCallbackURL, mcpCallbackURL, httpRegistry, mcpRegistry)
-		}
-	}
-
+	// Internal-user auth is handled natively (see /auth/internal/* and the MCP
+	// native login). External IdP providers, if any, are loaded from the DB below.
 	dbAuthProviders, err := db.Auth.ListAuthProviders(ctx)
 	if err != nil {
 		log.WithError(err).Fatal("failed to load auth providers from database")
@@ -338,7 +263,11 @@ func main() {
 	}
 
 	jwtService := auth.NewJWTService(jwtSecret, 1*time.Hour)
-	authHandler := auth.NewHandler(httpRegistry, jwtService, cfg.AllowedOrigins)
+	var authenticator *auth.Authenticator
+	if cfg.InternalAuth.Enabled {
+		authenticator = auth.NewAuthenticator(db, cfg.InternalAuth.MaxFailedLogin, cfg.InternalAuth.FailedLoginIntervalMin, signingKey)
+	}
+	authHandler := auth.NewHandler(httpRegistry, jwtService, cfg.AllowedOrigins, authenticator)
 
 	// --- Load users and groups from DB ---
 	users, err := db.Users.ListAllUsers(ctx)
@@ -582,16 +511,14 @@ func main() {
 	authGroup.POST("/refresh", middleware.RateLimit(refreshLimiter), authHandler.Refresh)
 	authGroup.POST("/exchange", authHandler.Exchange)
 
-	// Hydra login/consent flow (only when Hydra is enabled)
+	// Native internal-user authentication (password + TOTP), no external IdP.
 	if cfg.InternalAuth.Enabled {
-		hydraLoginHandler := auth.NewHydraLoginHandler(cfg.InternalAuth.AdminURL, db, cfg.InternalAuth.MaxFailedLogin, cfg.InternalAuth.FailedLoginIntervalMin, signingKey)
-		hydraGroup := r.Group("/hydra")
-		hydraGroup.GET("/login", hydraLoginHandler.LoginGet)
-		hydraGroup.POST("/login", hydraLoginHandler.LoginPost)
-		hydraGroup.GET("/consent", hydraLoginHandler.Consent)
-		hydraGroup.GET("/logout", func(c *gin.Context) {
-			c.Redirect(http.StatusFound, "/")
-		})
+		loginLimiter := middleware.NewRateLimiter(cfg.InternalAuth.MaxFailedLogin * 4)
+		internalGroup := authGroup.Group("/internal")
+		internalGroup.GET("/signup-status", authHandler.InternalSignupStatus)
+		internalGroup.POST("/login", middleware.RateLimit(loginLimiter), authHandler.InternalLogin)
+		internalGroup.POST("/totp", middleware.RateLimit(loginLimiter), authHandler.InternalTOTP)
+		internalGroup.POST("/signup", middleware.RateLimit(loginLimiter), authHandler.InternalSignup)
 	}
 
 	// Create admin handler for runtime config management
@@ -644,6 +571,7 @@ func main() {
 		baseURL,
 	)
 	mcpServer.SetSystemAdminCheck(adminHandler.CanManageRepos)
+	mcpServer.SetAuthenticator(authenticator)
 	mcpServer.SetIndexer(searchIndexer)
 	mcpServer.SetSearch(backendHolder, repoStateStore)
 	mcpServer.RegisterRoutes(r)

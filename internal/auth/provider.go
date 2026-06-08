@@ -243,33 +243,6 @@ func NewProviderFromConfig(cfg storeauth.AuthProvider, callbackURL string) (*Pro
 	}
 }
 
-// NewHydraProvider creates a ProviderEntry for the internal Hydra auth provider.
-// Hydra is not stored in the auth_providers table — it is loaded directly from service config.
-func NewHydraProvider(publicURL, clientID, clientSecret, callbackURL string) (*ProviderEntry, error) {
-	scopes := []string{"openid", "email", "profile"}
-	discoveryURL := publicURL + "/.well-known/openid-configuration"
-	gp, err := gothoidc.New(clientID, clientSecret, callbackURL, discoveryURL, scopes...)
-	if err != nil {
-		return nil, fmt.Errorf("hydra OIDC discovery failed: %w", err)
-	}
-	gp.SetName("hydra")
-	ep := oauth2.Endpoint{
-		AuthURL:  publicURL + "/oauth2/auth",
-		TokenURL: publicURL + "/oauth2/token",
-	}
-	return &ProviderEntry{
-		Name:         "hydra",
-		GothProvider: gp,
-		OAuthConfig: &oauth2.Config{
-			ClientID:     clientID,
-			ClientSecret: clientSecret,
-			RedirectURL:  callbackURL,
-			Scopes:       scopes,
-			Endpoint:     ep,
-		},
-	}, nil
-}
-
 // newEntry builds a ProviderEntry with common fields.
 func newEntry(name string, gp goth.Provider, cfg storeauth.AuthProvider, callbackURL string, scopes []string, ep oauth2.Endpoint) *ProviderEntry {
 	return &ProviderEntry{

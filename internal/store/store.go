@@ -97,7 +97,7 @@ func EnsureDatabase(ctx context.Context, dsn string) error {
 	}
 	defer targetConn.Close(ctx)
 
-	for _, schema := range []string{"admont_ai", "hydra"} {
+	for _, schema := range []string{"admont_ai"} {
 		if _, err := targetConn.Exec(ctx, fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS "%s"`, schema)); err != nil {
 			return fmt.Errorf("creating schema %q: %w", schema, err)
 		}

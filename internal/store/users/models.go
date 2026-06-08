@@ -13,9 +13,10 @@ const (
 var AllRoles = []Role{RoleSystemAdmin, RoleUserAdmin, RoleRepoAdmin}
 
 type UserEntry struct {
-	ID                int      `yaml:"-" json:"id"`
+	ID int `yaml:"-" json:"id"`
+	// Internal is derived from Provider (== "internal") and kept for API
+	// compatibility; it is populated when scanning rows, not stored directly.
 	Internal          bool     `yaml:"-" json:"internal"`
-	ProviderID        int      `yaml:"-" json:"-"`
 	Provider          string   `yaml:"provider" json:"provider"`
 	Email             string   `yaml:"email" json:"email"`
 	FirstName         string   `yaml:"first_name" json:"first_name"`
@@ -50,8 +51,7 @@ type UserGroup struct {
 
 // GroupMemberRef identifies a user for group membership operations.
 type GroupMemberRef struct {
-	UserID       int
-	InternalUser bool
+	UserID int
 }
 
 // HasRole checks if a user entry has the given role. Super admins have all roles.

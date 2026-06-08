@@ -11,6 +11,9 @@ import (
 
 const timeFormat = time.RFC3339
 
+// internalUserID is a scalar subquery resolving an internal user's id by email.
+const internalUserID = `(SELECT id FROM users WHERE provider = 'internal' AND email = $1)`
+
 type Store struct {
 	pool *pgxpool.Pool
 }
@@ -19,108 +22,201 @@ func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
 }
 
-// --- Internal users ---
+// userColumns is the shared projection for reading a user joined to its
+// optional credentials row.
+const userColumns = `
+	u.id, u.provider, u.email, u.first_name, u.last_name, u.super_admin, u.roles, u.suspended,
+	COALESCE(c.password_expired, FALSE), c.password_changed_at, COALESCE(c.totp_enabled, FALSE),
+	u.created_at, u.updated_at`
 
-// ListInternalUsers returns all internal users.
-func (s *Store) ListInternalUsers(ctx context.Context) ([]UserEntry, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT id, email, first_name, last_name, super_admin, roles, password_expired, suspended, password_changed_at, totp_enabled, created_at, updated_at
-		FROM internal_users
-		ORDER BY email
-	`)
+// scanUser scans a row produced with userColumns into a UserEntry.
+func scanUser(row pgx.Row) (*UserEntry, error) {
+	var u UserEntry
+	var pwChangedAt *time.Time
+	var createdAt, updatedAt time.Time
+	if err := row.Scan(&u.ID, &u.Provider, &u.Email, &u.FirstName, &u.LastName, &u.SuperAdmin,
+		&u.Roles, &u.Suspended, &u.PasswordExpired, &pwChangedAt, &u.TOTPEnabled, &createdAt, &updatedAt); err != nil {
+		return nil, err
+	}
+	u.Internal = u.Provider == "internal"
+	if pwChangedAt != nil {
+		u.PasswordChangedAt = pwChangedAt.UTC().Format(timeFormat)
+	}
+	u.CreatedAt = createdAt.UTC().Format(timeFormat)
+	u.UpdatedAt = updatedAt.UTC().Format(timeFormat)
+	return &u, nil
+}
+
+// --- Users (unified) ---
+
+// ListUsers returns all users (internal and external).
+func (s *Store) ListUsers(ctx context.Context) ([]UserEntry, error) {
+	rows, err := s.pool.Query(ctx, `SELECT`+userColumns+`
+		FROM users u LEFT JOIN credentials c ON c.user_id = u.id
+		ORDER BY u.provider, u.email`)
 	if err != nil {
-		return nil, fmt.Errorf("listing internal users: %w", err)
+		return nil, fmt.Errorf("listing users: %w", err)
 	}
 	defer rows.Close()
 
 	var users []UserEntry
 	for rows.Next() {
-		var u UserEntry
-		var pwChangedAt *time.Time
-		var createdAt, updatedAt time.Time
-		if err := rows.Scan(&u.ID, &u.Email, &u.FirstName, &u.LastName, &u.SuperAdmin, &u.Roles, &u.PasswordExpired, &u.Suspended, &pwChangedAt, &u.TOTPEnabled, &createdAt, &updatedAt); err != nil {
+		u, err := scanUser(rows)
+		if err != nil {
 			return nil, err
 		}
-		u.Internal = true
-		if pwChangedAt != nil {
-			u.PasswordChangedAt = pwChangedAt.UTC().Format(timeFormat)
-		}
-		u.CreatedAt = createdAt.UTC().Format(timeFormat)
-		u.UpdatedAt = updatedAt.UTC().Format(timeFormat)
-		users = append(users, u)
+		users = append(users, *u)
 	}
 	return users, rows.Err()
 }
 
-// GetInternalUser retrieves an internal user by email.
-func (s *Store) GetInternalUser(ctx context.Context, email string) (*UserEntry, error) {
-	var u UserEntry
-	var pwChangedAt *time.Time
-	err := s.pool.QueryRow(ctx, `
-		SELECT id, email, first_name, last_name, super_admin, roles, password_expired, suspended, password_changed_at, totp_enabled
-		FROM internal_users
-		WHERE email = $1
-	`, email).Scan(&u.ID, &u.Email, &u.FirstName, &u.LastName, &u.SuperAdmin, &u.Roles, &u.PasswordExpired, &u.Suspended, &pwChangedAt, &u.TOTPEnabled)
+func (s *Store) listUsersByProvider(ctx context.Context, internal bool) ([]UserEntry, error) {
+	op := "="
+	if !internal {
+		op = "<>"
+	}
+	rows, err := s.pool.Query(ctx, `SELECT`+userColumns+`
+		FROM users u LEFT JOIN credentials c ON c.user_id = u.id
+		WHERE u.provider `+op+` 'internal'
+		ORDER BY u.provider, u.email`)
+	if err != nil {
+		return nil, fmt.Errorf("listing users: %w", err)
+	}
+	defer rows.Close()
+
+	var users []UserEntry
+	for rows.Next() {
+		u, err := scanUser(rows)
+		if err != nil {
+			return nil, err
+		}
+		users = append(users, *u)
+	}
+	return users, rows.Err()
+}
+
+// GetUser retrieves a user by provider and email, or nil if not found.
+func (s *Store) GetUser(ctx context.Context, provider, email string) (*UserEntry, error) {
+	row := s.pool.QueryRow(ctx, `SELECT`+userColumns+`
+		FROM users u LEFT JOIN credentials c ON c.user_id = u.id
+		WHERE u.provider = $1 AND u.email = $2`, provider, email)
+	u, err := scanUser(row)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("getting internal user %q: %w", email, err)
+		return nil, fmt.Errorf("getting user %s:%s: %w", provider, email, err)
 	}
-	u.Internal = true
-	if pwChangedAt != nil {
-		u.PasswordChangedAt = pwChangedAt.UTC().Format(timeFormat)
-	}
-	return &u, nil
+	return u, nil
 }
 
-// UpsertInternalUser inserts or updates an internal user.
-func (s *Store) UpsertInternalUser(ctx context.Context, u UserEntry) error {
+// GetUserID returns the id of a user by provider and email.
+func (s *Store) GetUserID(ctx context.Context, provider, email string) (int, error) {
+	var id int
+	err := s.pool.QueryRow(ctx, `SELECT id FROM users WHERE provider = $1 AND email = $2`, provider, email).Scan(&id)
+	if err == pgx.ErrNoRows {
+		return 0, fmt.Errorf("user %s:%s not found", provider, email)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("looking up user %s:%s: %w", provider, email, err)
+	}
+	return id, nil
+}
+
+// UpsertUser inserts or updates a user's profile fields (not credentials).
+// The provider must be set on the entry ("internal" or an external IdP name).
+func (s *Store) UpsertUser(ctx context.Context, u UserEntry) error {
+	provider := u.Provider
+	if provider == "" && u.Internal {
+		provider = "internal"
+	}
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO internal_users (email, first_name, last_name, super_admin, roles, password_expired, suspended)
+		INSERT INTO users (provider, email, first_name, last_name, super_admin, roles, suspended)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		ON CONFLICT (email) DO UPDATE SET
+		ON CONFLICT (provider, email) DO UPDATE SET
 			first_name = EXCLUDED.first_name,
 			last_name = EXCLUDED.last_name,
 			super_admin = EXCLUDED.super_admin,
 			roles = EXCLUDED.roles,
-			password_expired = EXCLUDED.password_expired,
 			suspended = EXCLUDED.suspended
-	`, u.Email, u.FirstName, u.LastName, u.SuperAdmin, u.Roles, u.PasswordExpired, u.Suspended)
+	`, provider, u.Email, u.FirstName, u.LastName, u.SuperAdmin, u.Roles, u.Suspended)
 	if err != nil {
-		return fmt.Errorf("upserting internal user %q: %w", u.Email, err)
+		return fmt.Errorf("upserting user %s:%s: %w", provider, u.Email, err)
+	}
+	return nil
+}
+
+// DeleteUser removes a user by provider and email. Credentials and group
+// memberships are removed via ON DELETE CASCADE.
+func (s *Store) DeleteUser(ctx context.Context, provider, email string) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM users WHERE provider = $1 AND email = $2`, provider, email)
+	if err != nil {
+		return fmt.Errorf("deleting user %s:%s: %w", provider, email, err)
+	}
+	return nil
+}
+
+// --- Internal users (compat wrappers) ---
+
+// ListInternalUsers returns all internal (password) users.
+func (s *Store) ListInternalUsers(ctx context.Context) ([]UserEntry, error) {
+	return s.listUsersByProvider(ctx, true)
+}
+
+// GetInternalUser retrieves an internal user by email.
+func (s *Store) GetInternalUser(ctx context.Context, email string) (*UserEntry, error) {
+	return s.GetUser(ctx, "internal", email)
+}
+
+// UpsertInternalUser inserts or updates an internal user and ensures a
+// credentials row exists (carrying password_expired).
+func (s *Store) UpsertInternalUser(ctx context.Context, u UserEntry) error {
+	u.Provider = "internal"
+	if err := s.UpsertUser(ctx, u); err != nil {
+		return err
+	}
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO credentials (user_id, password_expired)
+		VALUES (`+internalUserID+`, $2)
+		ON CONFLICT (user_id) DO UPDATE SET password_expired = EXCLUDED.password_expired
+	`, u.Email, u.PasswordExpired)
+	if err != nil {
+		return fmt.Errorf("upserting credentials for %q: %w", u.Email, err)
 	}
 	return nil
 }
 
 // DeleteInternalUser removes an internal user by email.
 func (s *Store) DeleteInternalUser(ctx context.Context, email string) error {
-	_, err := s.pool.Exec(ctx, `DELETE FROM internal_users WHERE email = $1`, email)
-	if err != nil {
-		return fmt.Errorf("deleting internal user %q: %w", email, err)
-	}
-	return nil
+	return s.DeleteUser(ctx, "internal", email)
 }
 
-// SetPasswordHash sets the password hash for an internal user.
+// GetInternalUserID returns the id of an internal user by email.
+func (s *Store) GetInternalUserID(ctx context.Context, email string) (int, error) {
+	return s.GetUserID(ctx, "internal", email)
+}
+
+// SetPasswordHash sets the password hash for an internal user, creating the
+// credentials row if needed.
 func (s *Store) SetPasswordHash(ctx context.Context, email, hash string) error {
-	_, err := s.pool.Exec(ctx,
-		`UPDATE internal_users SET password_hash = $2, password_changed_at = NOW() WHERE email = $1`,
-		email, hash,
-	)
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO credentials (user_id, password_hash, password_changed_at)
+		VALUES (`+internalUserID+`, $2, NOW())
+		ON CONFLICT (user_id) DO UPDATE SET password_hash = EXCLUDED.password_hash, password_changed_at = NOW()
+	`, email, hash)
 	if err != nil {
 		return fmt.Errorf("setting password hash for %q: %w", email, err)
 	}
 	return nil
 }
 
-// GetPasswordHash returns the password hash for an internal user.
+// GetPasswordHash returns the password hash for an internal user ("" if none).
 func (s *Store) GetPasswordHash(ctx context.Context, email string) (string, error) {
 	var hash string
-	err := s.pool.QueryRow(ctx,
-		`SELECT password_hash FROM internal_users WHERE email = $1`,
-		email,
-	).Scan(&hash)
+	err := s.pool.QueryRow(ctx, `
+		SELECT c.password_hash FROM credentials c
+		JOIN users u ON u.id = c.user_id
+		WHERE u.provider = 'internal' AND u.email = $1`, email).Scan(&hash)
 	if err == pgx.ErrNoRows {
 		return "", nil
 	}
@@ -133,36 +229,22 @@ func (s *Store) GetPasswordHash(ctx context.Context, email string) (string, erro
 // ClearPasswordExpired sets password_expired to false for an internal user.
 func (s *Store) ClearPasswordExpired(ctx context.Context, email string) error {
 	_, err := s.pool.Exec(ctx,
-		`UPDATE internal_users SET password_expired = FALSE WHERE email = $1`,
-		email,
-	)
+		`UPDATE credentials SET password_expired = FALSE WHERE user_id = `+internalUserID, email)
 	if err != nil {
 		return fmt.Errorf("clearing password_expired for %q: %w", email, err)
 	}
 	return nil
 }
 
-// GetInternalUserID returns the internal user ID for a given email.
-func (s *Store) GetInternalUserID(ctx context.Context, email string) (int, error) {
-	var id int
-	err := s.pool.QueryRow(ctx, `SELECT id FROM internal_users WHERE email = $1`, email).Scan(&id)
-	if err == pgx.ErrNoRows {
-		return 0, fmt.Errorf("internal user %q not found", email)
-	}
-	if err != nil {
-		return 0, fmt.Errorf("looking up internal user %q: %w", email, err)
-	}
-	return id, nil
-}
+// --- TOTP (internal users) ---
 
-// --- TOTP ---
-
-// SetTOTPSecret stores the encrypted TOTP secret for an internal user (does not enable TOTP).
+// SetTOTPSecret stores the encrypted TOTP secret (does not enable TOTP).
 func (s *Store) SetTOTPSecret(ctx context.Context, email, encryptedSecret string) error {
-	_, err := s.pool.Exec(ctx,
-		`UPDATE internal_users SET totp_secret = $2, totp_enabled = FALSE WHERE email = $1`,
-		email, encryptedSecret,
-	)
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO credentials (user_id, totp_secret, totp_enabled)
+		VALUES (`+internalUserID+`, $2, FALSE)
+		ON CONFLICT (user_id) DO UPDATE SET totp_secret = EXCLUDED.totp_secret, totp_enabled = FALSE
+	`, email, encryptedSecret)
 	if err != nil {
 		return fmt.Errorf("setting TOTP secret for %q: %w", email, err)
 	}
@@ -172,9 +254,7 @@ func (s *Store) SetTOTPSecret(ctx context.Context, email, encryptedSecret string
 // EnableTOTP sets totp_enabled to true for an internal user.
 func (s *Store) EnableTOTP(ctx context.Context, email string) error {
 	_, err := s.pool.Exec(ctx,
-		`UPDATE internal_users SET totp_enabled = TRUE WHERE email = $1`,
-		email,
-	)
+		`UPDATE credentials SET totp_enabled = TRUE WHERE user_id = `+internalUserID, email)
 	if err != nil {
 		return fmt.Errorf("enabling TOTP for %q: %w", email, err)
 	}
@@ -184,23 +264,21 @@ func (s *Store) EnableTOTP(ctx context.Context, email string) error {
 // DisableTOTP clears the TOTP secret, disables TOTP, and removes recovery codes.
 func (s *Store) DisableTOTP(ctx context.Context, email string) error {
 	_, err := s.pool.Exec(ctx,
-		`UPDATE internal_users SET totp_secret = '', totp_enabled = FALSE, totp_recovery_codes = '{}' WHERE email = $1`,
-		email,
-	)
+		`UPDATE credentials SET totp_secret = '', totp_enabled = FALSE, totp_recovery_codes = '{}' WHERE user_id = `+internalUserID, email)
 	if err != nil {
 		return fmt.Errorf("disabling TOTP for %q: %w", email, err)
 	}
 	return nil
 }
 
-// GetTOTPSecret returns the encrypted TOTP secret and enabled status for an internal user.
+// GetTOTPSecret returns the encrypted TOTP secret and enabled status.
 func (s *Store) GetTOTPSecret(ctx context.Context, email string) (string, bool, error) {
 	var secret string
 	var enabled bool
-	err := s.pool.QueryRow(ctx,
-		`SELECT totp_secret, totp_enabled FROM internal_users WHERE email = $1`,
-		email,
-	).Scan(&secret, &enabled)
+	err := s.pool.QueryRow(ctx, `
+		SELECT c.totp_secret, c.totp_enabled FROM credentials c
+		JOIN users u ON u.id = c.user_id
+		WHERE u.provider = 'internal' AND u.email = $1`, email).Scan(&secret, &enabled)
 	if err == pgx.ErrNoRows {
 		return "", false, nil
 	}
@@ -213,10 +291,10 @@ func (s *Store) GetTOTPSecret(ctx context.Context, email string) (string, bool, 
 // IsTOTPEnabled returns whether TOTP is enabled for an internal user.
 func (s *Store) IsTOTPEnabled(ctx context.Context, email string) (bool, error) {
 	var enabled bool
-	err := s.pool.QueryRow(ctx,
-		`SELECT totp_enabled FROM internal_users WHERE email = $1`,
-		email,
-	).Scan(&enabled)
+	err := s.pool.QueryRow(ctx, `
+		SELECT c.totp_enabled FROM credentials c
+		JOIN users u ON u.id = c.user_id
+		WHERE u.provider = 'internal' AND u.email = $1`, email).Scan(&enabled)
 	if err == pgx.ErrNoRows {
 		return false, nil
 	}
@@ -228,10 +306,11 @@ func (s *Store) IsTOTPEnabled(ctx context.Context, email string) (bool, error) {
 
 // SetTOTPRecoveryCodes stores bcrypt-hashed recovery codes for an internal user.
 func (s *Store) SetTOTPRecoveryCodes(ctx context.Context, email string, hashedCodes []string) error {
-	_, err := s.pool.Exec(ctx,
-		`UPDATE internal_users SET totp_recovery_codes = $2 WHERE email = $1`,
-		email, hashedCodes,
-	)
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO credentials (user_id, totp_recovery_codes)
+		VALUES (`+internalUserID+`, $2)
+		ON CONFLICT (user_id) DO UPDATE SET totp_recovery_codes = EXCLUDED.totp_recovery_codes
+	`, email, hashedCodes)
 	if err != nil {
 		return fmt.Errorf("setting TOTP recovery codes for %q: %w", email, err)
 	}
@@ -241,10 +320,10 @@ func (s *Store) SetTOTPRecoveryCodes(ctx context.Context, email string, hashedCo
 // GetTOTPRecoveryCodes returns the bcrypt-hashed recovery codes for an internal user.
 func (s *Store) GetTOTPRecoveryCodes(ctx context.Context, email string) ([]string, error) {
 	var codes []string
-	err := s.pool.QueryRow(ctx,
-		`SELECT totp_recovery_codes FROM internal_users WHERE email = $1`,
-		email,
-	).Scan(&codes)
+	err := s.pool.QueryRow(ctx, `
+		SELECT c.totp_recovery_codes FROM credentials c
+		JOIN users u ON u.id = c.user_id
+		WHERE u.provider = 'internal' AND u.email = $1`, email).Scan(&codes)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -257,126 +336,50 @@ func (s *Store) GetTOTPRecoveryCodes(ctx context.Context, email string) ([]strin
 // UpdateTOTPRecoveryCodes replaces the recovery codes (e.g. after consuming one).
 func (s *Store) UpdateTOTPRecoveryCodes(ctx context.Context, email string, remainingCodes []string) error {
 	_, err := s.pool.Exec(ctx,
-		`UPDATE internal_users SET totp_recovery_codes = $2 WHERE email = $1`,
-		email, remainingCodes,
-	)
+		`UPDATE credentials SET totp_recovery_codes = $2 WHERE user_id = `+internalUserID, email, remainingCodes)
 	if err != nil {
 		return fmt.Errorf("updating TOTP recovery codes for %q: %w", email, err)
 	}
 	return nil
 }
 
-// --- External users ---
+// --- External users (compat wrappers) ---
 
-// ListExternalUsers returns all external users.
+// ListExternalUsers returns all external (IdP) users.
 func (s *Store) ListExternalUsers(ctx context.Context) ([]UserEntry, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT u.id, u.provider_id, ap.name, u.email, u.first_name, u.last_name, u.super_admin, u.roles, u.created_at, u.updated_at
-		FROM external_users u
-		JOIN auth_providers ap ON ap.id = u.provider_id
-		ORDER BY ap.name, u.email
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("listing external users: %w", err)
-	}
-	defer rows.Close()
-
-	var users []UserEntry
-	for rows.Next() {
-		var u UserEntry
-		var createdAt, updatedAt time.Time
-		if err := rows.Scan(&u.ID, &u.ProviderID, &u.Provider, &u.Email, &u.FirstName, &u.LastName, &u.SuperAdmin, &u.Roles, &createdAt, &updatedAt); err != nil {
-			return nil, err
-		}
-		u.CreatedAt = createdAt.UTC().Format(timeFormat)
-		u.UpdatedAt = updatedAt.UTC().Format(timeFormat)
-		users = append(users, u)
-	}
-	return users, rows.Err()
+	return s.listUsersByProvider(ctx, false)
 }
 
-// GetExternalUser retrieves an external user by provider ID and email.
-func (s *Store) GetExternalUser(ctx context.Context, providerID int, email string) (*UserEntry, error) {
-	var u UserEntry
-	err := s.pool.QueryRow(ctx, `
-		SELECT u.id, u.provider_id, ap.name, u.email, u.first_name, u.last_name, u.super_admin, u.roles
-		FROM external_users u
-		JOIN auth_providers ap ON ap.id = u.provider_id
-		WHERE u.provider_id = $1 AND u.email = $2
-	`, providerID, email).Scan(&u.ID, &u.ProviderID, &u.Provider, &u.Email, &u.FirstName, &u.LastName, &u.SuperAdmin, &u.Roles)
-	if err == pgx.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("getting external user (provider_id=%d, email=%s): %w", providerID, email, err)
-	}
-	return &u, nil
+// GetExternalUser retrieves an external user by provider name and email.
+func (s *Store) GetExternalUser(ctx context.Context, provider, email string) (*UserEntry, error) {
+	return s.GetUser(ctx, provider, email)
 }
 
-// UpsertExternalUser inserts or updates an external user.
+// UpsertExternalUser inserts or updates an external user (provider name on entry).
 func (s *Store) UpsertExternalUser(ctx context.Context, u UserEntry) error {
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO external_users (provider_id, email, first_name, last_name, super_admin, roles)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		ON CONFLICT (provider_id, email) DO UPDATE SET
-			first_name = EXCLUDED.first_name,
-			last_name = EXCLUDED.last_name,
-			super_admin = EXCLUDED.super_admin,
-			roles = EXCLUDED.roles
-	`, u.ProviderID, u.Email, u.FirstName, u.LastName, u.SuperAdmin, u.Roles)
-	if err != nil {
-		return fmt.Errorf("upserting external user (provider_id=%d, email=%s): %w", u.ProviderID, u.Email, err)
-	}
-	return nil
+	return s.UpsertUser(ctx, u)
 }
 
-// DeleteExternalUser removes an external user by provider ID and email.
-func (s *Store) DeleteExternalUser(ctx context.Context, providerID int, email string) error {
-	_, err := s.pool.Exec(ctx,
-		`DELETE FROM external_users WHERE provider_id = $1 AND email = $2`,
-		providerID, email,
-	)
-	if err != nil {
-		return fmt.Errorf("deleting external user (provider_id=%d, email=%s): %w", providerID, email, err)
-	}
-	return nil
+// DeleteExternalUser removes an external user by provider name and email.
+func (s *Store) DeleteExternalUser(ctx context.Context, provider, email string) error {
+	return s.DeleteUser(ctx, provider, email)
 }
 
-// GetExternalUserID returns the external user ID for a given provider name and email.
-func (s *Store) GetExternalUserID(ctx context.Context, providerName, email string) (int, error) {
-	var id int
-	err := s.pool.QueryRow(ctx, `
-		SELECT u.id FROM external_users u
-		JOIN auth_providers ap ON ap.id = u.provider_id
-		WHERE ap.name = $1 AND u.email = $2
-	`, providerName, email).Scan(&id)
-	if err == pgx.ErrNoRows {
-		return 0, fmt.Errorf("external user %s:%s not found", providerName, email)
-	}
-	if err != nil {
-		return 0, fmt.Errorf("looking up external user %s:%s: %w", providerName, email, err)
-	}
-	return id, nil
+// GetExternalUserID returns the id of an external user by provider name and email.
+func (s *Store) GetExternalUserID(ctx context.Context, provider, email string) (int, error) {
+	return s.GetUserID(ctx, provider, email)
 }
 
 // --- Combined ---
 
-// ListAllUsers returns all internal and external users combined.
+// ListAllUsers returns all users.
 func (s *Store) ListAllUsers(ctx context.Context) ([]UserEntry, error) {
-	internal, err := s.ListInternalUsers(ctx)
-	if err != nil {
-		return nil, err
-	}
-	external, err := s.ListExternalUsers(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return append(internal, external...), nil
+	return s.ListUsers(ctx)
 }
 
 // --- Groups ---
 
-// ListGroups returns all user groups with their members from the database.
+// ListGroups returns all user groups with their members.
 func (s *Store) ListGroups(ctx context.Context) ([]UserGroup, error) {
 	rows, err := s.pool.Query(ctx, `SELECT id, name, description, roles FROM user_groups ORDER BY name`)
 	if err != nil {
@@ -453,7 +456,7 @@ func (s *Store) DeleteGroup(ctx context.Context, name string) error {
 	return nil
 }
 
-// SetGroupMembers replaces all members of a group with the given member refs.
+// SetGroupMembers replaces all members of a group with the given user ids.
 func (s *Store) SetGroupMembers(ctx context.Context, groupName string, members []GroupMemberRef) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -461,40 +464,34 @@ func (s *Store) SetGroupMembers(ctx context.Context, groupName string, members [
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	// Get group ID
 	var groupID int
-	err = tx.QueryRow(ctx, `SELECT id FROM user_groups WHERE name = $1`, groupName).Scan(&groupID)
-	if err != nil {
+	if err := tx.QueryRow(ctx, `SELECT id FROM user_groups WHERE name = $1`, groupName).Scan(&groupID); err != nil {
 		return fmt.Errorf("group %q not found: %w", groupName, err)
 	}
 
-	// Clear existing members
-	_, err = tx.Exec(ctx, `DELETE FROM user_group_members WHERE group_id = $1`, groupID)
-	if err != nil {
+	if _, err := tx.Exec(ctx, `DELETE FROM user_group_members WHERE group_id = $1`, groupID); err != nil {
 		return fmt.Errorf("clearing members of group %q: %w", groupName, err)
 	}
 
-	// Insert new members
 	for _, m := range members {
-		_, err = tx.Exec(ctx,
-			`INSERT INTO user_group_members (group_id, user_id, internal_user) VALUES ($1, $2, $3)`,
-			groupID, m.UserID, m.InternalUser)
-		if err != nil {
-			return fmt.Errorf("adding member (user_id=%d, internal=%v) to group %q: %w", m.UserID, m.InternalUser, groupName, err)
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO user_group_members (group_id, user_id) VALUES ($1, $2)`,
+			groupID, m.UserID); err != nil {
+			return fmt.Errorf("adding member (user_id=%d) to group %q: %w", m.UserID, groupName, err)
 		}
 	}
 
 	return tx.Commit(ctx)
 }
 
-// getGroupMembers returns the users belonging to a group, from both internal and external tables.
+// getGroupMembers returns the users belonging to a group.
 func (s *Store) getGroupMembers(ctx context.Context, groupID int) ([]UserEntry, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT ugm.user_id, ugm.internal_user
+	rows, err := s.pool.Query(ctx, `SELECT`+userColumns+`
 		FROM user_group_members ugm
+		JOIN users u ON u.id = ugm.user_id
+		LEFT JOIN credentials c ON c.user_id = u.id
 		WHERE ugm.group_id = $1
-		ORDER BY ugm.internal_user DESC, ugm.user_id
-	`, groupID)
+		ORDER BY u.provider, u.email`, groupID)
 	if err != nil {
 		return nil, fmt.Errorf("listing group members: %w", err)
 	}
@@ -502,62 +499,11 @@ func (s *Store) getGroupMembers(ctx context.Context, groupID int) ([]UserEntry, 
 
 	var members []UserEntry
 	for rows.Next() {
-		var userID int
-		var internal bool
-		if err := rows.Scan(&userID, &internal); err != nil {
+		u, err := scanUser(rows)
+		if err != nil {
 			return nil, err
 		}
-
-		if internal {
-			u, err := s.getInternalUserByID(ctx, userID)
-			if err != nil {
-				return nil, err
-			}
-			if u != nil {
-				members = append(members, *u)
-			}
-		} else {
-			u, err := s.getExternalUserByID(ctx, userID)
-			if err != nil {
-				return nil, err
-			}
-			if u != nil {
-				members = append(members, *u)
-			}
-		}
+		members = append(members, *u)
 	}
 	return members, rows.Err()
-}
-
-func (s *Store) getInternalUserByID(ctx context.Context, id int) (*UserEntry, error) {
-	var u UserEntry
-	err := s.pool.QueryRow(ctx, `
-		SELECT id, email, first_name, last_name, super_admin, roles
-		FROM internal_users WHERE id = $1
-	`, id).Scan(&u.ID, &u.Email, &u.FirstName, &u.LastName, &u.SuperAdmin, &u.Roles)
-	if err == pgx.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("getting internal user by id %d: %w", id, err)
-	}
-	u.Internal = true
-	return &u, nil
-}
-
-func (s *Store) getExternalUserByID(ctx context.Context, id int) (*UserEntry, error) {
-	var u UserEntry
-	err := s.pool.QueryRow(ctx, `
-		SELECT u.id, u.provider_id, ap.name, u.email, u.first_name, u.last_name, u.super_admin, u.roles
-		FROM external_users u
-		JOIN auth_providers ap ON ap.id = u.provider_id
-		WHERE u.id = $1
-	`, id).Scan(&u.ID, &u.ProviderID, &u.Provider, &u.Email, &u.FirstName, &u.LastName, &u.SuperAdmin, &u.Roles)
-	if err == pgx.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("getting external user by id %d: %w", id, err)
-	}
-	return &u, nil
 }

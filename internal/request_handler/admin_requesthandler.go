@@ -680,8 +680,8 @@ func (h *AdminRequesthandler) AddExternalUser(c fuego.ContextWithBody[addExterna
 	}
 
 	ctx := context.Background()
-	providerID, err := h.store.Auth.GetAuthProviderID(ctx, body.Provider)
-	if err != nil {
+	// Validate the provider exists (by name) before creating the user.
+	if _, err := h.store.Auth.GetAuthProviderID(ctx, body.Provider); err != nil {
 		return users.UserEntry{}, fuego.BadRequestError{Detail: fmt.Sprintf("unknown provider %q", body.Provider)}
 	}
 
@@ -700,7 +700,6 @@ func (h *AdminRequesthandler) AddExternalUser(c fuego.ContextWithBody[addExterna
 	}
 
 	entry := users.UserEntry{
-		ProviderID: providerID,
 		Provider:   body.Provider,
 		Email:      body.Email,
 		FirstName:  body.FirstName,
@@ -786,17 +785,13 @@ func (h *AdminRequesthandler) DeleteExternalUser(c fuego.ContextNoBody) (message
 	}
 
 	ctx := context.Background()
-	providerID, err := h.store.Auth.GetAuthProviderID(ctx, providerName)
-	if err != nil {
-		return messageResponse{}, fuego.BadRequestError{Detail: fmt.Sprintf("unknown provider %q", providerName)}
-	}
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	for i := range h.users {
 		if !h.users[i].Internal && h.users[i].Provider == providerName && h.users[i].Email == email {
-			if err := h.store.Users.DeleteExternalUser(ctx, providerID, email); err != nil {
+			if err := h.store.Users.DeleteExternalUser(ctx, providerName, email); err != nil {
 				return messageResponse{}, fuego.InternalServerError{Detail: fmt.Sprintf("deleting user: %v", err)}
 			}
 			h.users = append(h.users[:i], h.users[i+1:]...)
@@ -991,19 +986,11 @@ func (h *AdminRequesthandler) resolveMembers(ctx context.Context, members []memb
 		if m.Provider == "" || m.Email == "" {
 			return nil, fmt.Errorf("member requires both provider and email")
 		}
-		if m.Provider == "internal" {
-			id, err := h.store.Users.GetInternalUserID(ctx, m.Email)
-			if err != nil {
-				return nil, fmt.Errorf("internal user %q not found", m.Email)
-			}
-			refs = append(refs, users.GroupMemberRef{UserID: id, InternalUser: true})
-		} else {
-			id, err := h.store.Users.GetExternalUserID(ctx, m.Provider, m.Email)
-			if err != nil {
-				return nil, fmt.Errorf("user %s:%s not found", m.Provider, m.Email)
-			}
-			refs = append(refs, users.GroupMemberRef{UserID: id, InternalUser: false})
+		id, err := h.store.Users.GetUserID(ctx, m.Provider, m.Email)
+		if err != nil {
+			return nil, fmt.Errorf("user %s:%s not found", m.Provider, m.Email)
 		}
+		refs = append(refs, users.GroupMemberRef{UserID: id})
 	}
 	return refs, nil
 }
