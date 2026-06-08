@@ -25,7 +25,7 @@ func NewStore(pool *pgxpool.Pool) *Store {
 // userColumns is the shared projection for reading a user joined to its
 // optional credentials row.
 const userColumns = `
-	u.id, u.provider, u.email, u.first_name, u.last_name, u.super_admin, u.roles, u.suspended,
+	u.id, u.provider, u.email, u.first_name, u.last_name, u.super_admin, u.roles, u.suspended, u.status,
 	COALESCE(c.password_expired, FALSE), c.password_changed_at, COALESCE(c.totp_enabled, FALSE),
 	u.created_at, u.updated_at`
 
@@ -35,7 +35,7 @@ func scanUser(row pgx.Row) (*UserEntry, error) {
 	var pwChangedAt *time.Time
 	var createdAt, updatedAt time.Time
 	if err := row.Scan(&u.ID, &u.Provider, &u.Email, &u.FirstName, &u.LastName, &u.SuperAdmin,
-		&u.Roles, &u.Suspended, &u.PasswordExpired, &pwChangedAt, &u.TOTPEnabled, &createdAt, &updatedAt); err != nil {
+		&u.Roles, &u.Suspended, &u.Status, &u.PasswordExpired, &pwChangedAt, &u.TOTPEnabled, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
 	u.Internal = u.Provider == "internal"
@@ -130,18 +130,63 @@ func (s *Store) UpsertUser(ctx context.Context, u UserEntry) error {
 	if provider == "" && u.Internal {
 		provider = "internal"
 	}
+	status := u.Status
+	if status == "" {
+		status = "active"
+	}
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO users (provider, email, first_name, last_name, super_admin, roles, suspended)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO users (provider, email, first_name, last_name, super_admin, roles, suspended, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (provider, email) DO UPDATE SET
 			first_name = EXCLUDED.first_name,
 			last_name = EXCLUDED.last_name,
 			super_admin = EXCLUDED.super_admin,
 			roles = EXCLUDED.roles,
-			suspended = EXCLUDED.suspended
-	`, provider, u.Email, u.FirstName, u.LastName, u.SuperAdmin, u.Roles, u.Suspended)
+			suspended = EXCLUDED.suspended,
+			status = EXCLUDED.status
+	`, provider, u.Email, u.FirstName, u.LastName, u.SuperAdmin, u.Roles, u.Suspended, status)
 	if err != nil {
 		return fmt.Errorf("upserting user %s:%s: %w", provider, u.Email, err)
+	}
+	return nil
+}
+
+// CreateExternalUser inserts a new external user with the given status,
+// doing nothing if one already exists. Used by the social-login flow.
+func (s *Store) CreateExternalUser(ctx context.Context, provider, email, firstName, lastName, status string) error {
+	if status == "" {
+		status = "active"
+	}
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO users (provider, email, first_name, last_name, status)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (provider, email) DO NOTHING
+	`, provider, email, firstName, lastName, status)
+	if err != nil {
+		return fmt.Errorf("creating external user %s:%s: %w", provider, email, err)
+	}
+	return nil
+}
+
+// UpdateUserProfile refreshes only the display-name fields (e.g. from the IdP
+// on each successful social login); it does not touch roles/status/suspended.
+func (s *Store) UpdateUserProfile(ctx context.Context, provider, email, firstName, lastName string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE users SET first_name = $3, last_name = $4 WHERE provider = $1 AND email = $2`,
+		provider, email, firstName, lastName)
+	if err != nil {
+		return fmt.Errorf("updating profile for %s:%s: %w", provider, email, err)
+	}
+	return nil
+}
+
+// SetUserStatus updates a user's lifecycle status (e.g. approving a pending user).
+func (s *Store) SetUserStatus(ctx context.Context, provider, email, status string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE users SET status = $3 WHERE provider = $1 AND email = $2`,
+		provider, email, status)
+	if err != nil {
+		return fmt.Errorf("setting status for %s:%s: %w", provider, email, err)
 	}
 	return nil
 }

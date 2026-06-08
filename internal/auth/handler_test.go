@@ -11,7 +11,7 @@ func TestIsAllowedRedirect(t *testing.T) {
 	h := NewHandler(NewRegistry(), NewJWTService("secret", time.Hour), []string{
 		"http://localhost:5173",
 		"https://app.example.com",
-	}, nil)
+	}, nil, nil, "manual")
 
 	tests := []struct {
 		name    string
@@ -37,7 +37,7 @@ func TestIsAllowedRedirect(t *testing.T) {
 }
 
 func TestExchange_ValidCode(t *testing.T) {
-	h := NewHandler(NewRegistry(), NewJWTService("secret", time.Hour), nil, nil)
+	h := NewHandler(NewRegistry(), NewJWTService("secret", time.Hour), nil, nil, nil, "manual")
 
 	h.authCodes.Store("test-code", &authCodeStore{
 		Token:        "jwt-token",
@@ -57,7 +57,7 @@ func TestExchange_ValidCode(t *testing.T) {
 }
 
 func TestExchange_ExpiredCode(t *testing.T) {
-	h := NewHandler(NewRegistry(), NewJWTService("secret", time.Hour), nil, nil)
+	h := NewHandler(NewRegistry(), NewJWTService("secret", time.Hour), nil, nil, nil, "manual")
 
 	h.authCodes.Store("expired-code", &authCodeStore{
 		Token:        "jwt-token",
@@ -69,4 +69,20 @@ func TestExchange_ExpiredCode(t *testing.T) {
 	assert.True(t, ok)
 	entry := val.(*authCodeStore)
 	assert.True(t, time.Now().After(entry.ExpiresAt))
+}
+
+func TestSplitName(t *testing.T) {
+	cases := []struct{ in, first, last string }{
+		{"", "", ""},
+		{"Alice", "Alice", ""},
+		{"Alice Smith", "Alice", "Smith"},
+		{"Alice van der Berg", "Alice", "van der Berg"},
+		{"  Bob  Jones ", "Bob", "Jones"},
+	}
+	for _, c := range cases {
+		f, l := splitName(c.in)
+		if f != c.first || l != c.last {
+			t.Errorf("splitName(%q) = (%q,%q), want (%q,%q)", c.in, f, l, c.first, c.last)
+		}
+	}
 }

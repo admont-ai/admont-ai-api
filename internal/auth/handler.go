@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/christianfischer/md-wiki-server/internal/store/users"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 )
@@ -25,15 +27,20 @@ type Handler struct {
 	jwt            *JWTService
 	allowedOrigins []string
 	authn          *Authenticator
+	users          *users.Store
+	externalMode   string // "manual" | "approval" | "auto"
+	onUserChange   func()
 	authCodes      sync.Map
 }
 
-func NewHandler(registry *Registry, jwt *JWTService, allowedOrigins []string, authn *Authenticator) *Handler {
+func NewHandler(registry *Registry, jwt *JWTService, allowedOrigins []string, authn *Authenticator, usersStore *users.Store, externalMode string) *Handler {
 	return &Handler{
 		registry:       registry,
 		jwt:            jwt,
 		allowedOrigins: allowedOrigins,
 		authn:          authn,
+		users:          usersStore,
+		externalMode:   externalMode,
 	}
 }
 
@@ -112,10 +119,14 @@ func (h *Handler) Callback(c *gin.Context) {
 		return
 	}
 
-	// Map "hydra" provider to "internal" so the JWT identity matches internal user identities.
 	provider := userInfo.Provider
-	if provider == "hydra" {
-		provider = "internal"
+
+	// Gate the external (social) login per the configured signup mode.
+	if ok, reason := h.resolveExternalUser(c.Request.Context(), provider, userInfo.Email, userInfo.Name); !ok {
+		log.WithFields(log.Fields{"provider": provider, "email": userInfo.Email, "reason": reason}).
+			Info("external login denied")
+		h.denyRedirect(c, frontendRedirect, reason)
+		return
 	}
 
 	token, err := h.jwt.GenerateToken(userInfo.Email, userInfo.Name, userInfo.Subject, provider)
@@ -153,6 +164,97 @@ func (h *Handler) Callback(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"token": token, "refresh_token": refreshToken})
+}
+
+// SetUserChangeHook registers a callback invoked after the social-login flow
+// creates or updates a user record (used to refresh the admin's user cache).
+func (h *Handler) SetUserChangeHook(fn func()) { h.onUserChange = fn }
+
+func (h *Handler) notifyUserChange() {
+	if h.onUserChange != nil {
+		h.onUserChange()
+	}
+}
+
+// resolveExternalUser applies the external signup mode to a social login.
+// It returns (true, "") to allow the login, or (false, reason) to deny it,
+// where reason is one of "pending", "not_authorized", or "suspended".
+func (h *Handler) resolveExternalUser(ctx context.Context, provider, email, fullName string) (bool, string) {
+	if h.users == nil {
+		return true, "" // store not wired (e.g. tests) — fail open to legacy behavior
+	}
+	first, last := splitName(fullName)
+
+	existing, err := h.users.GetUser(ctx, provider, email)
+	if err != nil {
+		log.WithError(err).Error("external login: user lookup failed")
+		return false, "not_authorized"
+	}
+
+	if existing == nil {
+		switch h.externalMode {
+		case "auto":
+			if err := h.users.CreateExternalUser(ctx, provider, email, first, last, "active"); err != nil {
+				log.WithError(err).Error("external login: auto-provision failed")
+				return false, "not_authorized"
+			}
+			h.notifyUserChange()
+			return true, ""
+		case "approval":
+			if err := h.users.CreateExternalUser(ctx, provider, email, first, last, "pending"); err != nil {
+				log.WithError(err).Error("external login: pending-create failed")
+				return false, "not_authorized"
+			}
+			h.notifyUserChange()
+			return false, "pending"
+		default: // manual
+			return false, "not_authorized"
+		}
+	}
+
+	// Existing user — apply blocking/approval state, then refresh profile from IdP.
+	if existing.Suspended {
+		return false, "suspended"
+	}
+	if existing.Status != "active" {
+		return false, "pending"
+	}
+	if existing.FirstName != first || existing.LastName != last {
+		if err := h.users.UpdateUserProfile(ctx, provider, email, first, last); err != nil {
+			log.WithError(err).Warn("external login: profile refresh failed")
+		} else {
+			h.notifyUserChange() // keep the admin user cache in sync with the IdP-provided name
+		}
+	}
+	return true, ""
+}
+
+// denyRedirect sends the browser back to an allow-listed frontend with an
+// ?error=<reason> param, or returns a 403 JSON error if no safe redirect exists.
+func (h *Handler) denyRedirect(c *gin.Context, frontendRedirect, reason string) {
+	if frontendRedirect != "" && h.isAllowedRedirect(frontendRedirect) {
+		if u, err := url.Parse(frontendRedirect); err == nil {
+			q := u.Query()
+			q.Set("error", reason)
+			u.RawQuery = q.Encode()
+			c.Redirect(http.StatusTemporaryRedirect, u.String())
+			return
+		}
+	}
+	c.JSON(http.StatusForbidden, gin.H{"error": reason})
+}
+
+// splitName splits an IdP-provided full name into first and last components.
+func splitName(full string) (first, last string) {
+	full = strings.TrimSpace(full)
+	if full == "" {
+		return "", ""
+	}
+	parts := strings.SplitN(full, " ", 2)
+	if len(parts) == 1 {
+		return parts[0], ""
+	}
+	return parts[0], strings.TrimSpace(parts[1])
 }
 
 // Exchange trades a one-time code for tokens (used after OAuth redirect).

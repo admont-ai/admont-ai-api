@@ -14,4 +14,5 @@ DROP TABLE IF EXISTS auth_providers;
 DROP TABLE IF EXISTS settings;
 
 DROP FUNCTION IF EXISTS update_updated_at();
+DROP TYPE IF EXISTS user_status;
 DROP TYPE IF EXISTS user_role;

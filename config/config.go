@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/joho/godotenv"
+	log "github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 )
 
@@ -33,6 +34,14 @@ type InternalAuthConfig struct {
 	FailedLoginIntervalMin int    `mapstructure:"failed_login_interval_mins"`
 }
 
+// ExternalAuthConfig governs how social-login (external IdP) users are handled.
+type ExternalAuthConfig struct {
+	// SignupMode is one of: "manual" (only admin-preadded identities may log in),
+	// "approval" (first login creates a pending request requiring admin approval),
+	// or "auto" (any provider account is auto-provisioned on first login).
+	SignupMode string `mapstructure:"signup_mode"`
+}
+
 type SearchConfig struct {
 	OnnxRuntimePath string `mapstructure:"onnx_runtime_path"`
 	ModelPath       string `mapstructure:"model_path"`
@@ -53,6 +62,7 @@ type Config struct {
 	RepoClonePath   string             `mapstructure:"repo_clone_path"`
 	LocalRepoPath   string             `mapstructure:"local_repo_path"`
 	InternalAuth    InternalAuthConfig `mapstructure:"internal_auth"`
+	ExternalAuth    ExternalAuthConfig `mapstructure:"external_auth"`
 	Search          SearchConfig       `mapstructure:"search"`
 	ImportPath      string             `mapstructure:"import_path"`
 }
@@ -76,6 +86,7 @@ func Load() (*Config, error) {
 	viper.SetDefault("internal_auth.public_url", "http://localhost:4444")
 	viper.SetDefault("internal_auth.max_failed_login", 5)
 	viper.SetDefault("internal_auth.failed_login_interval_mins", 15)
+	viper.SetDefault("external_auth.signup_mode", "manual")
 	viper.SetDefault("repo_clone_path", "/tmp/admont-api/repos")
 	viper.SetDefault("local_repo_path", "/tmp/admont-api/local-repos")
 	viper.SetDefault("search.onnx_runtime_path", "/opt/homebrew/lib/libonnxruntime.dylib")
@@ -96,6 +107,7 @@ func Load() (*Config, error) {
 	_ = viper.BindEnv("languagetool_url", "LANGUAGETOOL_URL")
 	_ = viper.BindEnv("import_path", "IMPORT_PATH")
 	_ = viper.BindEnv("encryption_key", "ADMONT_ENCRYPTION_KEY")
+	_ = viper.BindEnv("external_auth.signup_mode", "EXTERNAL_AUTH_SIGNUP_MODE")
 	_ = viper.BindEnv("database.hostname", "DATABASE_HOSTNAME")
 	_ = viper.BindEnv("database.port", "DATABASE_PORT")
 	_ = viper.BindEnv("database.username", "DATABASE_USERNAME")
@@ -119,6 +131,14 @@ func Load() (*Config, error) {
 
 	if cfg.Database.Username == "" {
 		return nil, fmt.Errorf("database.username is not set — provide DATABASE_USERNAME (env/.env) or database.username (config.yaml); default credentials were intentionally removed")
+	}
+
+	switch cfg.ExternalAuth.SignupMode {
+	case "manual", "approval", "auto":
+		// valid
+	default:
+		log.Warnf("invalid external_auth.signup_mode %q — falling back to \"manual\"", cfg.ExternalAuth.SignupMode)
+		cfg.ExternalAuth.SignupMode = "manual"
 	}
 
 	return &cfg, nil

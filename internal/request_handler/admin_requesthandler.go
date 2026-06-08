@@ -628,12 +628,8 @@ func (h *AdminRequesthandler) ResetInternalUserTOTP(c fuego.ContextNoBody) (mess
 // --- External user CRUD ---
 
 type addExternalUserRequest struct {
-	Provider   string   `json:"provider" validate:"required"`
-	Email      string   `json:"email" validate:"required"`
-	FirstName  string   `json:"first_name"`
-	LastName   string   `json:"last_name"`
-	SuperAdmin bool     `json:"super_admin"`
-	Roles      []string `json:"roles"`
+	Provider string `json:"provider" validate:"required"`
+	Email    string `json:"email" validate:"required"`
 }
 
 type updateExternalUserRequest struct {
@@ -657,37 +653,22 @@ func (h *AdminRequesthandler) GetExternalUsers(c fuego.ContextNoBody) ([]users.U
 	return out, nil
 }
 
-// AddExternalUser creates a new external user.
+// AddExternalUser pre-authorizes an external (social-login) identity by
+// provider + email. Profile fields (name) are filled from the IdP on first
+// login; roles are assigned separately via UpdateExternalUser.
 func (h *AdminRequesthandler) AddExternalUser(c fuego.ContextWithBody[addExternalUserRequest]) (users.UserEntry, error) {
 	body, err := c.Body()
 	if err != nil {
 		return users.UserEntry{}, fuego.BadRequestError{Detail: "invalid request body"}
 	}
-	if body.Provider == "" {
-		return users.UserEntry{}, fuego.BadRequestError{Detail: "provider is required"}
-	}
-	if body.Email == "" {
-		return users.UserEntry{}, fuego.BadRequestError{Detail: "email is required"}
-	}
-
-	// Only super admins may create users with super-admin status or roles.
-	if body.SuperAdmin || len(body.Roles) > 0 {
-		callerID, _ := ginCtxBody(c).Get("user_identity")
-		cid, _ := callerID.(string)
-		if !h.IsSuperAdmin(cid) {
-			return users.UserEntry{}, fuego.ForbiddenError{Detail: "only a super admin can assign roles or super-admin status"}
-		}
+	if body.Provider == "" || body.Email == "" {
+		return users.UserEntry{}, fuego.BadRequestError{Detail: "provider and email are required"}
 	}
 
 	ctx := context.Background()
 	// Validate the provider exists (by name) before creating the user.
 	if _, err := h.store.Auth.GetAuthProviderID(ctx, body.Provider); err != nil {
 		return users.UserEntry{}, fuego.BadRequestError{Detail: fmt.Sprintf("unknown provider %q", body.Provider)}
-	}
-
-	roles := body.Roles
-	if roles == nil {
-		roles = []string{}
 	}
 
 	h.mu.Lock()
@@ -700,12 +681,10 @@ func (h *AdminRequesthandler) AddExternalUser(c fuego.ContextWithBody[addExterna
 	}
 
 	entry := users.UserEntry{
-		Provider:   body.Provider,
-		Email:      body.Email,
-		FirstName:  body.FirstName,
-		LastName:   body.LastName,
-		SuperAdmin: body.SuperAdmin,
-		Roles:      roles,
+		Provider: body.Provider,
+		Email:    body.Email,
+		Roles:    []string{},
+		Status:   "active",
 	}
 
 	if err := h.store.Users.UpsertExternalUser(ctx, entry); err != nil {
@@ -715,6 +694,45 @@ func (h *AdminRequesthandler) AddExternalUser(c fuego.ContextWithBody[addExterna
 	h.users = append(h.users, entry)
 	log.WithFields(log.Fields{"provider": body.Provider, "email": body.Email}).Info("external user added via admin API")
 	return entry, nil
+}
+
+// ApproveExternalUser activates a pending external user (approval mode).
+func (h *AdminRequesthandler) ApproveExternalUser(c fuego.ContextNoBody) (messageResponse, error) {
+	gc := ginCtx(c)
+	provider := gc.Param("provider")
+	email := gc.Param("email")
+	if provider == "" || email == "" {
+		return messageResponse{}, fuego.BadRequestError{Detail: "provider and email are required"}
+	}
+
+	ctx := context.Background()
+	if err := h.store.Users.SetUserStatus(ctx, provider, email, "active"); err != nil {
+		return messageResponse{}, fuego.InternalServerError{Detail: "failed to approve user"}
+	}
+
+	h.mu.Lock()
+	for i := range h.users {
+		if !h.users[i].Internal && h.users[i].Provider == provider && h.users[i].Email == email {
+			h.users[i].Status = "active"
+		}
+	}
+	h.mu.Unlock()
+
+	log.WithFields(log.Fields{"provider": provider, "email": email}).Info("external user approved via admin API")
+	return messageResponse{Message: fmt.Sprintf("external user (%s:%s) approved", provider, email)}, nil
+}
+
+// ReloadUsers refreshes the in-memory user cache from the database. Invoked
+// after the social-login flow creates or updates a user record.
+func (h *AdminRequesthandler) ReloadUsers() {
+	dbUsers, err := h.store.Users.ListAllUsers(context.Background())
+	if err != nil {
+		log.WithError(err).Warn("failed to reload users cache")
+		return
+	}
+	h.mu.Lock()
+	h.users = dbUsers
+	h.mu.Unlock()
 }
 
 // UpdateExternalUser updates an external user.

@@ -267,7 +267,7 @@ func main() {
 	if cfg.InternalAuth.Enabled {
 		authenticator = auth.NewAuthenticator(db, cfg.InternalAuth.MaxFailedLogin, cfg.InternalAuth.FailedLoginIntervalMin, signingKey)
 	}
-	authHandler := auth.NewHandler(httpRegistry, jwtService, cfg.AllowedOrigins, authenticator)
+	authHandler := auth.NewHandler(httpRegistry, jwtService, cfg.AllowedOrigins, authenticator, db.Users, cfg.ExternalAuth.SignupMode)
 
 	// --- Load users and groups from DB ---
 	users, err := db.Users.ListAllUsers(ctx)
@@ -546,6 +546,8 @@ func main() {
 	})
 
 	adminHandler.SetSessionInvalidator(jwtService.InvalidateSessions)
+	// Refresh the admin user cache when social login creates/updates a user.
+	authHandler.SetUserChangeHook(adminHandler.ReloadUsers)
 
 	// Wire up system admin check for file permissions
 	repoHandler.SetSystemAdminCheck(adminHandler.CanManageRepos)
@@ -1156,7 +1158,11 @@ func main() {
 	)
 	fuegogin.Delete(engine, adminExternalUsers, "/:provider/:email", adminHandler.DeleteExternalUser,
 		fuego.OptionTags("Admin"),
-		fuego.OptionSummary("Remove an external user"),
+		fuego.OptionSummary("Remove an external user (also denies a pending request)"),
+	)
+	fuegogin.Post(engine, adminExternalUsers, "/:provider/:email/approve", adminHandler.ApproveExternalUser,
+		fuego.OptionTags("Admin"),
+		fuego.OptionSummary("Approve a pending external user"),
 	)
 
 	// Group management routes — user_admin only

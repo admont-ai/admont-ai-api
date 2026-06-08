@@ -23,6 +23,9 @@ type UserEntry struct {
 	LastName          string   `yaml:"last_name" json:"last_name"`
 	SuperAdmin        bool     `yaml:"super_admin" json:"super_admin"`
 	Roles             []string `yaml:"roles" json:"roles"`
+	// Status is the account lifecycle state: "active" or "pending" (external
+	// users awaiting admin approval).
+	Status            string   `yaml:"-" json:"status,omitempty"`
 	TOTPEnabled       bool     `yaml:"-" json:"totp_enabled,omitempty"`
 	PasswordExpired   bool     `yaml:"-" json:"password_expired,omitempty"`
 	Suspended         bool     `yaml:"-" json:"suspended,omitempty"`
