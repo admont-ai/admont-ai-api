@@ -70,8 +70,6 @@ func Load() (*Config, error) {
 	viper.SetDefault("allowed_origins", "http://localhost:5173")
 	viper.SetDefault("database.hostname", "localhost")
 	viper.SetDefault("database.port", 5433)
-	viper.SetDefault("database.username", "")
-	viper.SetDefault("database.password", "")
 	viper.SetDefault("database.db", "admont-ai")
 	viper.SetDefault("internal_auth.enabled", true)
 	viper.SetDefault("internal_auth.admin_url", "http://localhost:4445")
@@ -89,10 +87,21 @@ func Load() (*Config, error) {
 	viper.AutomaticEnv()
 
 	// Explicit bindings for env vars that don't match viper's auto-detection.
+	// Nested keys (database.*, search.*) are not picked up by AutomaticEnv
+	// without a key replacer, so they must be bound explicitly.
+	_ = viper.BindEnv("allowed_origins", "ALLOWED_ORIGINS")
+	_ = viper.BindEnv("trusted_proxies", "TRUSTED_PROXIES")
 	_ = viper.BindEnv("jwt_secret", "JWT_SECRET")
 	_ = viper.BindEnv("auth_base_url", "AUTH_BASE_URL")
 	_ = viper.BindEnv("languagetool_url", "LANGUAGETOOL_URL")
 	_ = viper.BindEnv("import_path", "IMPORT_PATH")
+	_ = viper.BindEnv("encryption_key", "ADMONT_ENCRYPTION_KEY")
+	_ = viper.BindEnv("database.hostname", "DATABASE_HOSTNAME")
+	_ = viper.BindEnv("database.port", "DATABASE_PORT")
+	_ = viper.BindEnv("database.username", "DATABASE_USERNAME")
+	_ = viper.BindEnv("database.password", "DATABASE_PASSWORD")
+	_ = viper.BindEnv("database.db", "DATABASE_DB")
+	_ = viper.BindEnv("database.ssl", "DATABASE_SSL")
 	_ = viper.BindEnv("search.onnx_runtime_path", "SEARCH_ONNX_RUNTIME_PATH")
 	_ = viper.BindEnv("search.model_path", "SEARCH_MODEL_PATH")
 	_ = viper.BindEnv("search.vocab_path", "SEARCH_VOCAB_PATH")
@@ -106,6 +115,10 @@ func Load() (*Config, error) {
 	var cfg Config
 	if err := viper.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("unmarshaling config: %w", err)
+	}
+
+	if cfg.Database.Username == "" {
+		return nil, fmt.Errorf("database.username is not set — provide DATABASE_USERNAME (env/.env) or database.username (config.yaml); default credentials were intentionally removed")
 	}
 
 	return &cfg, nil
