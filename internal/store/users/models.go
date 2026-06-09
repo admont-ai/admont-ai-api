@@ -23,11 +23,14 @@ type UserEntry struct {
 	LastName          string   `yaml:"last_name" json:"last_name"`
 	SuperAdmin        bool     `yaml:"super_admin" json:"super_admin"`
 	Roles             []string `yaml:"roles" json:"roles"`
-	// Status is the account lifecycle state: "active" or "pending" (external
-	// users awaiting admin approval).
+	// Status is the account lifecycle state: "active", "pending" (self-signup
+	// awaiting approval), "invited" (admin pre-added, activates on first login),
+	// or "suspended" (blocked).
 	Status            string   `yaml:"-" json:"status,omitempty"`
 	TOTPEnabled       bool     `yaml:"-" json:"totp_enabled,omitempty"`
 	PasswordExpired   bool     `yaml:"-" json:"password_expired,omitempty"`
+	// Suspended is derived from Status (== "suspended") for API/UI compatibility;
+	// it is not stored separately.
 	Suspended         bool     `yaml:"-" json:"suspended,omitempty"`
 	PasswordChangedAt string   `yaml:"-" json:"password_changed_at,omitempty"`
 	CreatedAt         string   `yaml:"-" json:"created_at,omitempty"`

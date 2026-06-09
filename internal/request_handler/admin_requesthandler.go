@@ -466,6 +466,10 @@ func (h *AdminRequesthandler) AddInternalUser(c fuego.ContextWithBody[addInterna
 		}
 	}
 
+	status := "active"
+	if body.Suspended {
+		status = "suspended"
+	}
 	entry := users.UserEntry{
 		Internal:        true,
 		Email:           body.Email,
@@ -474,6 +478,7 @@ func (h *AdminRequesthandler) AddInternalUser(c fuego.ContextWithBody[addInterna
 		SuperAdmin:      body.SuperAdmin,
 		Roles:           roles,
 		PasswordExpired: body.PasswordExpired,
+		Status:          status,
 		Suspended:       body.Suspended,
 	}
 
@@ -542,7 +547,8 @@ func (h *AdminRequesthandler) UpdateInternalUser(c fuego.ContextWithBody[updateI
 				h.users[i].PasswordExpired = *body.PasswordExpired
 			}
 			if body.Suspended != nil {
-				h.users[i].Suspended = *body.Suspended
+				h.users[i].Status = suspendStatus(h.users[i].Status, *body.Suspended)
+				h.users[i].Suspended = h.users[i].Status == "suspended"
 			}
 
 			if err := h.store.Users.UpsertInternalUser(ctx, h.users[i]); err != nil {
@@ -637,6 +643,20 @@ type updateExternalUserRequest struct {
 	LastName   *string  `json:"last_name"`
 	SuperAdmin *bool    `json:"super_admin"`
 	Roles      []string `json:"roles"`
+	Suspended  *bool    `json:"suspended"`
+}
+
+// suspendStatus maps a suspend toggle onto the lifecycle status: suspending
+// always yields "suspended"; un-suspending only un-blocks (does not override
+// pending/invited), restoring "active" from "suspended".
+func suspendStatus(current string, suspend bool) string {
+	if suspend {
+		return "suspended"
+	}
+	if current == "suspended" {
+		return "active"
+	}
+	return current
 }
 
 // GetExternalUsers returns all external users.
@@ -684,7 +704,7 @@ func (h *AdminRequesthandler) AddExternalUser(c fuego.ContextWithBody[addExterna
 		Provider: body.Provider,
 		Email:    body.Email,
 		Roles:    []string{},
-		Status:   "active",
+		Status:   "invited", // activates on the user's first successful login
 	}
 
 	if err := h.store.Users.UpsertExternalUser(ctx, entry); err != nil {
@@ -779,6 +799,10 @@ func (h *AdminRequesthandler) UpdateExternalUser(c fuego.ContextWithBody[updateE
 			}
 			if body.Roles != nil {
 				h.users[i].Roles = body.Roles
+			}
+			if body.Suspended != nil {
+				h.users[i].Status = suspendStatus(h.users[i].Status, *body.Suspended)
+				h.users[i].Suspended = h.users[i].Status == "suspended"
 			}
 
 			if err := h.store.Users.UpsertExternalUser(ctx, h.users[i]); err != nil {

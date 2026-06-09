@@ -216,17 +216,29 @@ func (h *Handler) resolveExternalUser(ctx context.Context, provider, email, full
 	if existing.Suspended {
 		return false, "suspended"
 	}
-	if existing.Status != "active" {
+	switch existing.Status {
+	case "pending":
+		// Self-signup awaiting admin approval — stays denied until approved.
 		return false, "pending"
-	}
-	if existing.FirstName != first || existing.LastName != last {
-		if err := h.users.UpdateUserProfile(ctx, provider, email, first, last); err != nil {
-			log.WithError(err).Warn("external login: profile refresh failed")
-		} else {
-			h.notifyUserChange() // keep the admin user cache in sync with the IdP-provided name
+	case "invited":
+		// Admin pre-authorized this user; first login activates them.
+		if err := h.users.SetUserStatus(ctx, provider, email, "active"); err != nil {
+			log.WithError(err).Error("external login: activating invited user failed")
+			return false, "not_authorized"
 		}
+		_ = h.users.UpdateUserProfile(ctx, provider, email, first, last)
+		h.notifyUserChange()
+		return true, ""
+	default: // active
+		if existing.FirstName != first || existing.LastName != last {
+			if err := h.users.UpdateUserProfile(ctx, provider, email, first, last); err != nil {
+				log.WithError(err).Warn("external login: profile refresh failed")
+			} else {
+				h.notifyUserChange() // keep the admin user cache in sync with the IdP name
+			}
+		}
+		return true, ""
 	}
-	return true, ""
 }
 
 // denyRedirect sends the browser back to an allow-listed frontend with an

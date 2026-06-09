@@ -25,7 +25,7 @@ func NewStore(pool *pgxpool.Pool) *Store {
 // userColumns is the shared projection for reading a user joined to its
 // optional credentials row.
 const userColumns = `
-	u.id, u.provider, u.email, u.first_name, u.last_name, u.super_admin, u.roles, u.suspended, u.status,
+	u.id, u.provider, u.email, u.first_name, u.last_name, u.super_admin, u.roles, u.status,
 	COALESCE(c.password_expired, FALSE), c.password_changed_at, COALESCE(c.totp_enabled, FALSE),
 	u.created_at, u.updated_at`
 
@@ -35,10 +35,11 @@ func scanUser(row pgx.Row) (*UserEntry, error) {
 	var pwChangedAt *time.Time
 	var createdAt, updatedAt time.Time
 	if err := row.Scan(&u.ID, &u.Provider, &u.Email, &u.FirstName, &u.LastName, &u.SuperAdmin,
-		&u.Roles, &u.Suspended, &u.Status, &u.PasswordExpired, &pwChangedAt, &u.TOTPEnabled, &createdAt, &updatedAt); err != nil {
+		&u.Roles, &u.Status, &u.PasswordExpired, &pwChangedAt, &u.TOTPEnabled, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
 	u.Internal = u.Provider == "internal"
+	u.Suspended = u.Status == "suspended"
 	if pwChangedAt != nil {
 		u.PasswordChangedAt = pwChangedAt.UTC().Format(timeFormat)
 	}
@@ -135,16 +136,15 @@ func (s *Store) UpsertUser(ctx context.Context, u UserEntry) error {
 		status = "active"
 	}
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO users (provider, email, first_name, last_name, super_admin, roles, suspended, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO users (provider, email, first_name, last_name, super_admin, roles, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (provider, email) DO UPDATE SET
 			first_name = EXCLUDED.first_name,
 			last_name = EXCLUDED.last_name,
 			super_admin = EXCLUDED.super_admin,
 			roles = EXCLUDED.roles,
-			suspended = EXCLUDED.suspended,
 			status = EXCLUDED.status
-	`, provider, u.Email, u.FirstName, u.LastName, u.SuperAdmin, u.Roles, u.Suspended, status)
+	`, provider, u.Email, u.FirstName, u.LastName, u.SuperAdmin, u.Roles, status)
 	if err != nil {
 		return fmt.Errorf("upserting user %s:%s: %w", provider, u.Email, err)
 	}

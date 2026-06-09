@@ -4,10 +4,10 @@ SET search_path TO admont_ai;
 
 CREATE TYPE user_role AS ENUM ('system_admin', 'user_admin', 'repo_admin');
 
--- Account lifecycle state. "pending" is used for external users awaiting
--- admin approval; "active" is the normal state. Blocking is orthogonal
--- (the suspended flag), so it is not represented here.
-CREATE TYPE user_status AS ENUM ('active', 'pending');
+-- Account lifecycle state: "invited" (admin pre-added, activates on first
+-- login), "pending" (self-signup awaiting admin approval), "active" (normal),
+-- "suspended" (blocked). Applies to internal and external users.
+CREATE TYPE user_status AS ENUM ('active', 'pending', 'invited', 'suspended');
 
 -- Auto-update updated_at on row modification.
 CREATE OR REPLACE FUNCTION update_updated_at()
@@ -102,7 +102,6 @@ CREATE TABLE users (
     last_name   TEXT NOT NULL DEFAULT '',
     super_admin BOOLEAN NOT NULL DEFAULT FALSE,
     roles       user_role[] NOT NULL DEFAULT '{}',
-    suspended   BOOLEAN NOT NULL DEFAULT FALSE,
     status      user_status NOT NULL DEFAULT 'active',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
