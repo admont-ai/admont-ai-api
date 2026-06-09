@@ -25,18 +25,22 @@ func NewStore(pool *pgxpool.Pool) *Store {
 // userColumns is the shared projection for reading a user joined to its
 // optional credentials row.
 const userColumns = `
-	u.id, u.provider, u.email, u.first_name, u.last_name, u.super_admin, u.roles, u.status,
+	u.id, u.provider, u.email, u.username, u.first_name, u.last_name, u.super_admin, u.roles, u.status,
 	COALESCE(c.password_expired, FALSE), c.password_changed_at, COALESCE(c.totp_enabled, FALSE),
 	u.created_at, u.updated_at`
 
 // scanUser scans a row produced with userColumns into a UserEntry.
 func scanUser(row pgx.Row) (*UserEntry, error) {
 	var u UserEntry
+	var username *string
 	var pwChangedAt *time.Time
 	var createdAt, updatedAt time.Time
-	if err := row.Scan(&u.ID, &u.Provider, &u.Email, &u.FirstName, &u.LastName, &u.SuperAdmin,
+	if err := row.Scan(&u.ID, &u.Provider, &u.Email, &username, &u.FirstName, &u.LastName, &u.SuperAdmin,
 		&u.Roles, &u.Status, &u.PasswordExpired, &pwChangedAt, &u.TOTPEnabled, &createdAt, &updatedAt); err != nil {
 		return nil, err
+	}
+	if username != nil {
+		u.Username = *username
 	}
 	u.Internal = u.Provider == "internal"
 	u.Suspended = u.Status == "suspended"
@@ -124,6 +128,21 @@ func (s *Store) GetUserID(ctx context.Context, provider, email string) (int, err
 	return id, nil
 }
 
+// GetUserByUsername retrieves an internal user by username, or nil if not found.
+func (s *Store) GetUserByUsername(ctx context.Context, username string) (*UserEntry, error) {
+	row := s.pool.QueryRow(ctx, `SELECT`+userColumns+`
+		FROM users u LEFT JOIN credentials c ON c.user_id = u.id
+		WHERE u.provider = 'internal' AND u.username = $1`, username)
+	u, err := scanUser(row)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("getting user by username %q: %w", username, err)
+	}
+	return u, nil
+}
+
 // UpsertUser inserts or updates a user's profile fields (not credentials).
 // The provider must be set on the entry ("internal" or an external IdP name).
 func (s *Store) UpsertUser(ctx context.Context, u UserEntry) error {
@@ -135,16 +154,21 @@ func (s *Store) UpsertUser(ctx context.Context, u UserEntry) error {
 	if status == "" {
 		status = "active"
 	}
+	var usernameArg any
+	if u.Username != "" {
+		usernameArg = u.Username
+	}
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO users (provider, email, first_name, last_name, super_admin, roles, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO users (provider, email, username, first_name, last_name, super_admin, roles, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (provider, email) DO UPDATE SET
+			username = EXCLUDED.username,
 			first_name = EXCLUDED.first_name,
 			last_name = EXCLUDED.last_name,
 			super_admin = EXCLUDED.super_admin,
 			roles = EXCLUDED.roles,
 			status = EXCLUDED.status
-	`, provider, u.Email, u.FirstName, u.LastName, u.SuperAdmin, u.Roles, status)
+	`, provider, u.Email, usernameArg, u.FirstName, u.LastName, u.SuperAdmin, u.Roles, status)
 	if err != nil {
 		return fmt.Errorf("upserting user %s:%s: %w", provider, u.Email, err)
 	}

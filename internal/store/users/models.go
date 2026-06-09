@@ -19,6 +19,7 @@ type UserEntry struct {
 	Internal          bool     `yaml:"-" json:"internal"`
 	Provider          string   `yaml:"provider" json:"provider"`
 	Email             string   `yaml:"email" json:"email"`
+	Username          string   `yaml:"username,omitempty" json:"username,omitempty"`
 	FirstName         string   `yaml:"first_name" json:"first_name"`
 	LastName          string   `yaml:"last_name" json:"last_name"`
 	SuperAdmin        bool     `yaml:"super_admin" json:"super_admin"`

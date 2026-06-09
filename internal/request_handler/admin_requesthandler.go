@@ -395,7 +395,7 @@ func (h *AdminRequesthandler) GetAllUsers(c fuego.ContextNoBody) ([]users.UserEn
 // --- Internal user CRUD ---
 
 type addInternalUserRequest struct {
-	Email           string   `json:"email" validate:"required"`
+	Username        string   `json:"username" validate:"required"`
 	FirstName       string   `json:"first_name"`
 	LastName        string   `json:"last_name"`
 	Password        string   `json:"password" validate:"required"`
@@ -435,8 +435,8 @@ func (h *AdminRequesthandler) AddInternalUser(c fuego.ContextWithBody[addInterna
 	if err != nil {
 		return users.UserEntry{}, fuego.BadRequestError{Detail: "invalid request body"}
 	}
-	if body.Email == "" {
-		return users.UserEntry{}, fuego.BadRequestError{Detail: "email is required"}
+	if body.Username == "" {
+		return users.UserEntry{}, fuego.BadRequestError{Detail: "username is required"}
 	}
 	if body.Password == "" {
 		return users.UserEntry{}, fuego.BadRequestError{Detail: "password is required"}
@@ -461,8 +461,8 @@ func (h *AdminRequesthandler) AddInternalUser(c fuego.ContextWithBody[addInterna
 	defer h.mu.Unlock()
 
 	for _, u := range h.users {
-		if u.Internal && u.Email == body.Email {
-			return users.UserEntry{}, fuego.ConflictError{Detail: fmt.Sprintf("internal user %q already exists", body.Email)}
+		if u.Internal && u.Username == body.Username {
+			return users.UserEntry{}, fuego.ConflictError{Detail: fmt.Sprintf("internal user %q already exists", body.Username)}
 		}
 	}
 
@@ -472,7 +472,8 @@ func (h *AdminRequesthandler) AddInternalUser(c fuego.ContextWithBody[addInterna
 	}
 	entry := users.UserEntry{
 		Internal:        true,
-		Email:           body.Email,
+		Username:        body.Username,
+		Email:           body.Username,
 		FirstName:       body.FirstName,
 		LastName:        body.LastName,
 		SuperAdmin:      body.SuperAdmin,
@@ -490,12 +491,12 @@ func (h *AdminRequesthandler) AddInternalUser(c fuego.ContextWithBody[addInterna
 	if err != nil {
 		return users.UserEntry{}, fuego.InternalServerError{Detail: "failed to hash password"}
 	}
-	if err := h.store.Users.SetPasswordHash(ctx, body.Email, string(hash)); err != nil {
+	if err := h.store.Users.SetPasswordHash(ctx, body.Username, string(hash)); err != nil {
 		return users.UserEntry{}, fuego.InternalServerError{Detail: fmt.Sprintf("saving password: %v", err)}
 	}
 
 	h.users = append(h.users, entry)
-	log.WithFields(log.Fields{"email": body.Email}).Info("internal user added via admin API")
+	log.WithFields(log.Fields{"username": body.Username}).Info("internal user added via admin API")
 	return entry, nil
 }
 

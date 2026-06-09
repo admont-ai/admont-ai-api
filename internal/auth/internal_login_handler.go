@@ -42,7 +42,7 @@ func (h *Handler) issueTokens(c *gin.Context, email, name string) {
 	c.JSON(http.StatusOK, gin.H{"token": token, "refresh_token": refresh})
 }
 
-// InternalLogin authenticates an internal user with email + password.
+// InternalLogin authenticates an internal user with username/email + password.
 // If 2FA is enabled it returns {totp_required:true, pending_token}; otherwise
 // it returns {token, refresh_token}.
 func (h *Handler) InternalLogin(c *gin.Context) {
@@ -51,11 +51,11 @@ func (h *Handler) InternalLogin(c *gin.Context) {
 		return
 	}
 	var body struct {
-		Email    string `json:"email"`
+		Username string `json:"username"`
 		Password string `json:"password"`
 	}
-	if err := c.ShouldBindJSON(&body); err != nil || body.Email == "" || body.Password == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "email and password are required"})
+	if err := c.ShouldBindJSON(&body); err != nil || body.Username == "" || body.Password == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "username and password are required"})
 		return
 	}
 
@@ -65,11 +65,11 @@ func (h *Handler) InternalLogin(c *gin.Context) {
 		return
 	}
 
-	user, err := h.authn.VerifyPassword(c.Request.Context(), ip, body.Email, body.Password)
+	user, err := h.authn.VerifyPassword(c.Request.Context(), ip, body.Username, body.Password)
 	if err != nil {
 		switch err {
 		case ErrInvalidCredentials:
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid email or password"})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		case ErrAccountSuspended:
 			c.JSON(http.StatusForbidden, gin.H{"error": "account suspended"})
 		default:
@@ -79,11 +79,12 @@ func (h *Handler) InternalLogin(c *gin.Context) {
 		return
 	}
 
+	email := user.Email
 	if user.TOTPEnabled {
-		c.JSON(http.StatusOK, gin.H{"totp_required": true, "pending_token": h.authn.CreatePendingToken(body.Email)})
+		c.JSON(http.StatusOK, gin.H{"totp_required": true, "pending_token": h.authn.CreatePendingToken(email)})
 		return
 	}
-	h.issueTokens(c, body.Email, displayName(user, body.Email))
+	h.issueTokens(c, email, displayName(user, email))
 }
 
 // InternalTOTP completes a login by verifying a TOTP or recovery code against
@@ -135,21 +136,21 @@ func (h *Handler) InternalSignup(c *gin.Context) {
 		return
 	}
 	var body struct {
-		Email     string `json:"email"`
+		Username  string `json:"username"`
 		Password  string `json:"password"`
 		FirstName string `json:"first_name"`
 		LastName  string `json:"last_name"`
 	}
-	if err := c.ShouldBindJSON(&body); err != nil || body.Email == "" || body.Password == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "email and password are required"})
+	if err := c.ShouldBindJSON(&body); err != nil || body.Username == "" || body.Password == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "username and password are required"})
 		return
 	}
 
-	err := h.authn.Signup(c.Request.Context(), body.Email, body.Password, body.FirstName, body.LastName)
+	err := h.authn.Signup(c.Request.Context(), body.Username, body.Password, body.FirstName, body.LastName)
 	switch err {
 	case nil:
-		log.WithField("identity", "internal:"+body.Email).Info("first internal user created")
-		h.issueTokens(c, body.Email, displayName(&users.UserEntry{FirstName: body.FirstName, LastName: body.LastName}, body.Email))
+		log.WithField("identity", "internal:"+body.Username).Info("first internal user created")
+		h.issueTokens(c, body.Username, displayName(&users.UserEntry{FirstName: body.FirstName, LastName: body.LastName}, body.Username))
 	case ErrWeakPassword:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "password must be at least 8 characters"})
 	case ErrSignupClosed:

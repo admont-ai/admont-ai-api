@@ -22,7 +22,7 @@ import (
 // user-facing messages without leaking which condition occurred (to avoid user
 // enumeration), except where noted.
 var (
-	ErrInvalidCredentials = errors.New("invalid email or password")
+	ErrInvalidCredentials = errors.New("invalid credentials")
 	ErrAccountSuspended   = errors.New("account suspended")
 	ErrRateLimited        = errors.New("too many attempts")
 	ErrSignupClosed       = errors.New("signup is closed")
@@ -119,13 +119,19 @@ func (a *Authenticator) Blocked(ip string) bool { return a.limiter.blocked(ip) }
 // Record registers a failed attempt for the IP.
 func (a *Authenticator) Record(ip string) { a.limiter.record(ip) }
 
-// VerifyPassword checks email+password. On success returns the user; on failure
-// returns a sentinel error and records a rate-limit strike. The caller should
-// have already checked Blocked(ip).
-func (a *Authenticator) VerifyPassword(ctx context.Context, ip, email, password string) (*storeusers.UserEntry, error) {
-	user, err := a.store.Users.GetInternalUser(ctx, email)
+// VerifyPassword checks username/email + password. Looks up by username first,
+// then falls back to email. On success returns the user; on failure returns a
+// sentinel error and records a rate-limit strike.
+func (a *Authenticator) VerifyPassword(ctx context.Context, ip, username, password string) (*storeusers.UserEntry, error) {
+	user, err := a.store.Users.GetUserByUsername(ctx, username)
 	if err != nil {
 		return nil, fmt.Errorf("looking up user: %w", err)
+	}
+	if user == nil {
+		user, err = a.store.Users.GetInternalUser(ctx, username)
+		if err != nil {
+			return nil, fmt.Errorf("looking up user: %w", err)
+		}
 	}
 	if user == nil {
 		a.Record(ip)
@@ -134,7 +140,7 @@ func (a *Authenticator) VerifyPassword(ctx context.Context, ip, email, password 
 	if user.Suspended {
 		return nil, ErrAccountSuspended
 	}
-	storedHash, err := a.store.Users.GetPasswordHash(ctx, email)
+	storedHash, err := a.store.Users.GetPasswordHash(ctx, user.Email)
 	if err != nil {
 		return nil, fmt.Errorf("getting password hash: %w", err)
 	}
@@ -181,8 +187,9 @@ func (a *Authenticator) VerifyTOTP(ctx context.Context, ip, email, code string) 
 
 // Signup creates the first internal user (super admin). It is only permitted
 // when no internal users exist yet, and is serialized to prevent a race
-// creating two super admins.
-func (a *Authenticator) Signup(ctx context.Context, email, password, firstName, lastName string) error {
+// creating two super admins. The username is used as login identifier and also
+// stored as the email for backward compatibility with identity strings.
+func (a *Authenticator) Signup(ctx context.Context, username, password, firstName, lastName string) error {
 	if len(password) < 8 {
 		return ErrWeakPassword
 	}
@@ -203,7 +210,8 @@ func (a *Authenticator) Signup(ctx context.Context, email, password, firstName, 
 	}
 	entry := storeusers.UserEntry{
 		Internal:   true,
-		Email:      email,
+		Username:   username,
+		Email:      username,
 		FirstName:  firstName,
 		LastName:   lastName,
 		SuperAdmin: true,
@@ -212,7 +220,7 @@ func (a *Authenticator) Signup(ctx context.Context, email, password, firstName, 
 	if err := a.store.Users.UpsertInternalUser(ctx, entry); err != nil {
 		return fmt.Errorf("creating first user: %w", err)
 	}
-	if err := a.store.Users.SetPasswordHash(ctx, email, string(hash)); err != nil {
+	if err := a.store.Users.SetPasswordHash(ctx, username, string(hash)); err != nil {
 		return fmt.Errorf("storing password hash: %w", err)
 	}
 	return nil

@@ -98,6 +98,7 @@ CREATE TABLE users (
     id          SERIAL PRIMARY KEY,
     provider    TEXT NOT NULL,              -- "internal" or the external IdP name
     email       TEXT NOT NULL,
+    username    TEXT,                       -- login identifier for internal users
     first_name  TEXT NOT NULL DEFAULT '',
     last_name   TEXT NOT NULL DEFAULT '',
     super_admin BOOLEAN NOT NULL DEFAULT FALSE,
@@ -107,6 +108,8 @@ CREATE TABLE users (
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (provider, email)
 );
+
+CREATE UNIQUE INDEX idx_users_username ON users (username) WHERE username IS NOT NULL;
 
 -- Credentials are 0..1 per user; only internal users have a row.
 CREATE TABLE credentials (
