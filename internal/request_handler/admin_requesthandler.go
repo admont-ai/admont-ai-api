@@ -1970,6 +1970,7 @@ type llmTokenLimits struct {
 	Generate  int64 `json:"generate"`
 	Summarize int64 `json:"summarize"`
 	Edit      int64 `json:"edit"`
+	Agent     int64 `json:"agent"`
 }
 
 // GetLLMTokenLimits returns the configured per-action output-token limits.
@@ -1993,7 +1994,7 @@ func (h *AdminRequesthandler) SetLLMTokenLimits(c fuego.ContextWithBody[llmToken
 	if err != nil {
 		return llmTokenLimits{}, fuego.BadRequestError{Detail: "invalid request body"}
 	}
-	if body.Ask < 0 || body.Generate < 0 || body.Summarize < 0 || body.Edit < 0 {
+	if body.Ask < 0 || body.Generate < 0 || body.Summarize < 0 || body.Edit < 0 || body.Agent < 0 {
 		return llmTokenLimits{}, fuego.BadRequestError{Detail: "token limits must not be negative"}
 	}
 

@@ -422,6 +422,9 @@ func main() {
 	ragHandler.SetConversationStore(db.Conversations, summarizer)
 	convHandler := requesthandler.NewConversationRequesthandler(db.Conversations)
 
+	agentHandler := requesthandler.NewAgentRequesthandler(llmClient, backendHolder, backends, repoConfigs, repoHandler.PermResolvers(), docPaths, searchIndexer)
+	agentHandler.SetConversationStore(db.Conversations, summarizer)
+
 	// Initialize search backend from existing provider (if any)
 	searchProviders, err := db.Search.ListSearchProviders(ctx)
 	if err != nil {
@@ -539,6 +542,7 @@ func main() {
 		newClient := buildLLMClient(db, modelRegistry)
 		llmHandler.SetClient(newClient)
 		ragHandler.SetClient(newClient)
+		agentHandler.SetClient(newClient)
 		summarizer.SetClient(newClient)
 		fetchCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		modelRegistry.FetchAll(fetchCtx)
@@ -552,6 +556,7 @@ func main() {
 
 	// Wire up system admin check for file permissions
 	repoHandler.SetSystemAdminCheck(adminHandler.CanManageRepos)
+	agentHandler.SetSystemAdminCheck(adminHandler.CanManageRepos)
 
 	// Set default import path for Confluence imports
 	repoHandler.SetImportPath(cfg.ImportPath)
@@ -983,6 +988,10 @@ func main() {
 	fuegogin.Get(engine, repo, "", repoHandler.ListFiles,
 		fuego.OptionTags("Files"),
 		fuego.OptionSummary("List all files and folders"),
+	)
+	fuegogin.Post(engine, repo, "/agent", agentHandler.Agent,
+		fuego.OptionTags("RAG"),
+		fuego.OptionSummary("Agentic AI assistant with repo-scoped file tools"),
 	)
 	repo.GET("/file/*path", repoHandler.GetFile())
 	fuegogin.Get(engine, repo, "/fileinfo/*path", repoHandler.GetFileInfo,
