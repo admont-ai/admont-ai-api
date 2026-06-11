@@ -175,6 +175,15 @@ func (h *AgentRequesthandler) Agent(c fuego.ContextWithBody[agentRequest]) (agen
 
 		directive, ok := parseAgentReply(reply)
 		if !ok {
+			// A malformed tool attempt gets a protocol correction instead of
+			// leaking raw JSON to the user as the final answer.
+			if strings.Contains(reply, `"tool"`) {
+				messages = append(messages,
+					llm.ChatMessage{Role: "assistant", Content: reply},
+					llm.ChatMessage{Role: "user", Content: `PROTOCOL_ERROR: your reply was not exactly one valid JSON object. Reply with a single {"tool": ..., "args": {...}} or {"answer": "..."} object and nothing else.`},
+				)
+				continue
+			}
 			// The model answered in plain text — treat it as the final answer.
 			answer = strings.TrimSpace(stripCodeFence(reply))
 			break
@@ -264,6 +273,7 @@ Available tools:
 Protocol — every reply must be EXACTLY ONE JSON object, nothing else:
 - To use a tool: {"tool": "<name>", "args": {...}}
 - To finish: {"answer": "<final answer to the user in markdown, summarizing what you did>"}
+Never send more than one JSON object per reply — one tool call at a time, then wait for its result.
 After each tool call you receive a message starting with TOOL_RESULT containing the result or error.
 
 Rules:
@@ -273,17 +283,20 @@ Rules:
 - Prefer few, purposeful tool calls. When the request is unclear, finish with an answer asking for clarification instead of guessing.`, repoSlug, scope)
 }
 
-// parseAgentReply extracts the JSON directive from a model reply. Returns
-// ok=false when the reply contains no usable directive (plain-text answer).
+// parseAgentReply extracts the FIRST JSON directive from a model reply —
+// models sometimes emit several tool calls in one turn despite instructions;
+// the rest is ignored and the model re-issues remaining calls after seeing
+// the tool result. Returns ok=false when the reply contains no usable
+// directive (plain-text answer).
 func parseAgentReply(reply string) (*agentDirective, bool) {
 	s := strings.TrimSpace(stripCodeFence(reply))
 	start := strings.Index(s, "{")
-	end := strings.LastIndex(s, "}")
-	if start == -1 || end <= start {
+	if start == -1 {
 		return nil, false
 	}
+	dec := json.NewDecoder(strings.NewReader(s[start:]))
 	var d agentDirective
-	if err := json.Unmarshal([]byte(s[start:end+1]), &d); err != nil {
+	if err := dec.Decode(&d); err != nil {
 		return nil, false
 	}
 	if d.Tool == "" && d.Answer == "" {

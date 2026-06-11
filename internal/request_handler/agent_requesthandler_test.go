@@ -34,6 +34,17 @@ func TestParseAgentReply_JSONWithSurroundingProse(t *testing.T) {
 	assert.Equal(t, "a.md", d.Args.Path)
 }
 
+func TestParseAgentReply_MultipleObjectsTakesFirst(t *testing.T) {
+	d, ok := parseAgentReply(`{"tool": "list_files", "args": {}} {"tool": "create_file", "args": {"path": "kubernetes.md", "content": "# K8s"}}`)
+	require.True(t, ok)
+	assert.Equal(t, "list_files", d.Tool)
+
+	// Trailing prose after the object is ignored too.
+	d, ok = parseAgentReply(`{"tool": "read_file", "args": {"path": "a.md"}} Now I will read the file.`)
+	require.True(t, ok)
+	assert.Equal(t, "read_file", d.Tool)
+}
+
 func TestParseAgentReply_PlainText(t *testing.T) {
 	_, ok := parseAgentReply("Here is a summary of the document without any JSON.")
 	assert.False(t, ok)
