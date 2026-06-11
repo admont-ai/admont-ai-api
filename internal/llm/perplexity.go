@@ -8,15 +8,7 @@ import (
 	"github.com/openai/openai-go/v3/option"
 )
 
-var PerplexityModels = []Model{
-	{ID: "sonar-pro", Name: "Sonar Pro"},
-	{ID: "sonar", Name: "Sonar"},
-	{ID: "sonar-deep-research", Name: "Sonar Deep Research"},
-	{ID: "sonar-reasoning-pro", Name: "Sonar Reasoning Pro"},
-	{ID: "sonar-reasoning", Name: "Sonar Reasoning"},
-}
-
-var PerplexityDefaultModel = PerplexityModels[0] // Sonar Pro
+var PerplexityDefaultModel = Model{ID: "sonar-pro", Name: "Sonar Pro"}
 
 type PerplexityProvider struct {
 	client    openai.Client
@@ -34,7 +26,6 @@ func NewPerplexityProvider(apiKey string, maxTokens int64) *PerplexityProvider {
 }
 
 func (p *PerplexityProvider) Name() string        { return "perplexity" }
-func (p *PerplexityProvider) Models() []Model     { return PerplexityModels }
 func (p *PerplexityProvider) DefaultModel() Model { return PerplexityDefaultModel }
 
 func (p *PerplexityProvider) DoChat(ctx context.Context, model, systemPrompt string, messages []ChatMessage) (string, TokenUsage, error) {

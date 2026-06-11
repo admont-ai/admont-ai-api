@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/christianfischer/md-wiki-server/internal/auth"
 	"github.com/christianfischer/md-wiki-server/internal/draft"
@@ -1848,29 +1849,32 @@ func (h *AdminRequesthandler) registerProvider(p storeauth.AuthProvider) error {
 // --- LLM Provider CRUD ---
 
 type llmProviderResponse struct {
-	Name         string `json:"name"`
-	ProviderType string `json:"provider_type"`
-	APIKey       string `json:"api_key"`
-	BaseURL      string `json:"base_url,omitempty"`
-	MaxTokens    int64  `json:"max_tokens"`
-	DefaultModel string `json:"default_model"`
+	Name            string   `json:"name"`
+	ProviderType    string   `json:"provider_type"`
+	APIKey          string   `json:"api_key"`
+	BaseURL         string   `json:"base_url,omitempty"`
+	MaxTokens       int64    `json:"max_tokens"`
+	DefaultModel    string   `json:"default_model"`
+	FavouriteModels []string `json:"favourite_models"`
 }
 
 type addLLMProviderRequest struct {
-	Name         string `json:"name" validate:"required"`
-	ProviderType string `json:"provider_type" validate:"required"`
-	APIKey       string `json:"api_key"`
-	BaseURL      string `json:"base_url"`
-	MaxTokens    int64  `json:"max_tokens"`
-	DefaultModel string `json:"default_model"`
+	Name            string   `json:"name" validate:"required"`
+	ProviderType    string   `json:"provider_type" validate:"required"`
+	APIKey          string   `json:"api_key"`
+	BaseURL         string   `json:"base_url"`
+	MaxTokens       int64    `json:"max_tokens"`
+	DefaultModel    string   `json:"default_model"`
+	FavouriteModels []string `json:"favourite_models"`
 }
 
 type updateLLMProviderRequest struct {
-	ProviderType string `json:"provider_type"`
-	APIKey       string `json:"api_key"`
-	BaseURL      string `json:"base_url"`
-	MaxTokens    int64  `json:"max_tokens"`
-	DefaultModel string `json:"default_model"`
+	ProviderType    string   `json:"provider_type"`
+	APIKey          string   `json:"api_key"`
+	BaseURL         string   `json:"base_url"`
+	MaxTokens       int64    `json:"max_tokens"`
+	DefaultModel    string   `json:"default_model"`
+	FavouriteModels []string `json:"favourite_models"`
 }
 
 func obfuscateAPIKey(key string) string {
@@ -1942,15 +1946,42 @@ func (h *AdminRequesthandler) GetLLMProviders(c fuego.ContextNoBody) ([]llmProvi
 	var out []llmProviderResponse
 	for _, p := range providers {
 		out = append(out, llmProviderResponse{
-			Name:         p.Name,
-			ProviderType: p.ProviderType,
-			APIKey:       obfuscateAPIKey(p.APIKey),
-			BaseURL:      p.BaseURL,
-			MaxTokens:    p.MaxTokens,
-			DefaultModel: p.DefaultModel,
+			Name:            p.Name,
+			ProviderType:    p.ProviderType,
+			APIKey:          obfuscateAPIKey(p.APIKey),
+			BaseURL:         p.BaseURL,
+			MaxTokens:       p.MaxTokens,
+			DefaultModel:    p.DefaultModel,
+			FavouriteModels: p.FavouriteModels,
 		})
 	}
 	return out, nil
+}
+
+// GetLLMProviderModels returns the full (filtered) model list of a configured
+// provider, fetched live from the provider API. Used by the admin UI to let
+// the admin pick favourite models.
+func (h *AdminRequesthandler) GetLLMProviderModels(c fuego.ContextNoBody) ([]llm.Model, error) {
+	name := ginCtx(c).Param("name")
+	if name == "" {
+		return nil, fuego.BadRequestError{Detail: "name is required"}
+	}
+
+	existing, err := h.store.LLM.GetLLMProvider(context.Background(), name)
+	if err != nil {
+		return nil, fuego.InternalServerError{Detail: fmt.Sprintf("loading LLM provider: %v", err)}
+	}
+	if existing == nil {
+		return nil, fuego.NotFoundError{Detail: fmt.Sprintf("LLM provider %q not found", name)}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	models := h.modelRegistry.FetchProvider(ctx, existing.ProviderType)
+	if models == nil {
+		models = []llm.Model{}
+	}
+	return models, nil
 }
 
 // AddLLMProvider adds a new LLM provider.
@@ -1967,12 +1998,13 @@ func (h *AdminRequesthandler) AddLLMProvider(c fuego.ContextWithBody[addLLMProvi
 	}
 
 	p := storellm.LLMConfig{
-		Name:         body.Name,
-		ProviderType: body.ProviderType,
-		APIKey:       body.APIKey,
-		BaseURL:      body.BaseURL,
-		MaxTokens:    body.MaxTokens,
-		DefaultModel: body.DefaultModel,
+		Name:            body.Name,
+		ProviderType:    body.ProviderType,
+		APIKey:          body.APIKey,
+		BaseURL:         body.BaseURL,
+		MaxTokens:       body.MaxTokens,
+		DefaultModel:    body.DefaultModel,
+		FavouriteModels: body.FavouriteModels,
 	}
 
 	if err := h.store.LLM.UpsertLLMProvider(context.Background(), p); err != nil {
@@ -1985,12 +2017,13 @@ func (h *AdminRequesthandler) AddLLMProvider(c fuego.ContextWithBody[addLLMProvi
 	}
 	log.WithField("name", body.Name).Info("LLM provider added via admin API")
 	return llmProviderResponse{
-		Name:         p.Name,
-		ProviderType: p.ProviderType,
-		APIKey:       obfuscateAPIKey(p.APIKey),
-		BaseURL:      p.BaseURL,
-		MaxTokens:    p.MaxTokens,
-		DefaultModel: p.DefaultModel,
+		Name:            p.Name,
+		ProviderType:    p.ProviderType,
+		APIKey:          obfuscateAPIKey(p.APIKey),
+		BaseURL:         p.BaseURL,
+		MaxTokens:       p.MaxTokens,
+		DefaultModel:    p.DefaultModel,
+		FavouriteModels: p.FavouriteModels,
 	}, nil
 }
 
@@ -2029,6 +2062,10 @@ func (h *AdminRequesthandler) UpdateLLMProvider(c fuego.ContextWithBody[updateLL
 	if body.DefaultModel != "" {
 		existing.DefaultModel = body.DefaultModel
 	}
+	// nil = field omitted (keep current); empty array = clear favourites.
+	if body.FavouriteModels != nil {
+		existing.FavouriteModels = body.FavouriteModels
+	}
 
 	if err := h.store.LLM.UpsertLLMProvider(context.Background(), *existing); err != nil {
 		return llmProviderResponse{}, fuego.InternalServerError{Detail: fmt.Sprintf("saving LLM provider: %v", err)}
@@ -2039,12 +2076,13 @@ func (h *AdminRequesthandler) UpdateLLMProvider(c fuego.ContextWithBody[updateLL
 	}
 	log.WithField("name", name).Info("LLM provider updated via admin API")
 	return llmProviderResponse{
-		Name:         existing.Name,
-		ProviderType: existing.ProviderType,
-		APIKey:       obfuscateAPIKey(existing.APIKey),
-		BaseURL:      existing.BaseURL,
-		MaxTokens:    existing.MaxTokens,
-		DefaultModel: existing.DefaultModel,
+		Name:            existing.Name,
+		ProviderType:    existing.ProviderType,
+		APIKey:          obfuscateAPIKey(existing.APIKey),
+		BaseURL:         existing.BaseURL,
+		MaxTokens:       existing.MaxTokens,
+		DefaultModel:    existing.DefaultModel,
+		FavouriteModels: existing.FavouriteModels,
 	}, nil
 }
 

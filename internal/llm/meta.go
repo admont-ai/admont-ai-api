@@ -8,15 +8,7 @@ import (
 	"github.com/openai/openai-go/v3/option"
 )
 
-var MetaModels = []Model{
-	{ID: "Llama-4-Maverick-17B-128E-Instruct-FP8", Name: "Llama 4 Maverick"},
-	{ID: "Llama-4-Scout-17B-16E-Instruct", Name: "Llama 4 Scout"},
-	{ID: "Llama-3.3-70B-Instruct", Name: "Llama 3.3 70B"},
-	{ID: "Llama-3.2-3B-Instruct", Name: "Llama 3.2 3B"},
-	{ID: "Llama-3.2-1B-Instruct", Name: "Llama 3.2 1B"},
-}
-
-var MetaDefaultModel = MetaModels[0] // Llama 4 Maverick
+var MetaDefaultModel = Model{ID: "Llama-4-Maverick-17B-128E-Instruct-FP8", Name: "Llama 4 Maverick"}
 
 type MetaProvider struct {
 	client    openai.Client
@@ -34,7 +26,6 @@ func NewMetaProvider(apiKey string, maxTokens int64) *MetaProvider {
 }
 
 func (p *MetaProvider) Name() string        { return "meta" }
-func (p *MetaProvider) Models() []Model     { return MetaModels }
 func (p *MetaProvider) DefaultModel() Model { return MetaDefaultModel }
 
 func (p *MetaProvider) DoChat(ctx context.Context, model, systemPrompt string, messages []ChatMessage) (string, TokenUsage, error) {

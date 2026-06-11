@@ -12,7 +12,6 @@ type ChatMessage struct {
 type Provider interface {
 	Do(ctx context.Context, model, systemPrompt, userPrompt string) (string, TokenUsage, error)
 	DoChat(ctx context.Context, model, systemPrompt string, messages []ChatMessage) (string, TokenUsage, error)
-	Models() []Model
 	DefaultModel() Model
 	Name() string
 }

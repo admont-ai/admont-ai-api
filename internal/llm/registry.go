@@ -13,14 +13,16 @@ type ModelFetcher interface {
 	FetchModels(ctx context.Context) ([]Model, error)
 }
 
-// ModelRegistry stores fallback (hardcoded) and dynamic (API-fetched) models per provider.
+// ModelRegistry stores dynamically fetched models, per-provider favourites,
+// and default models. Model lists come exclusively from the provider APIs
+// (already filtered by the fetchers); there are no hardcoded lists.
 type ModelRegistry struct {
-	mu             sync.RWMutex
-	fallbackModels map[string][]Model
-	dynamicModels  map[string][]Model
-	defaultModels  map[string]Model
-	fetchers       map[string]ModelFetcher
-	configured     map[string]bool // providers that are actually configured (have API key / endpoint)
+	mu            sync.RWMutex
+	dynamicModels map[string][]Model
+	defaultModels map[string]Model
+	fetchers      map[string]ModelFetcher
+	favourites    map[string][]string // admin-selected model IDs per provider
+	configured    map[string]bool     // providers that are actually configured (have API key / endpoint)
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -29,19 +31,19 @@ type ModelRegistry struct {
 // NewModelRegistry creates an empty registry.
 func NewModelRegistry() *ModelRegistry {
 	return &ModelRegistry{
-		fallbackModels: make(map[string][]Model),
-		dynamicModels:  make(map[string][]Model),
-		defaultModels:  make(map[string]Model),
-		fetchers:       make(map[string]ModelFetcher),
-		configured:     make(map[string]bool),
+		dynamicModels: make(map[string][]Model),
+		defaultModels: make(map[string]Model),
+		fetchers:      make(map[string]ModelFetcher),
+		favourites:    make(map[string][]string),
+		configured:    make(map[string]bool),
 	}
 }
 
-// RegisterFallback stores the hardcoded models and default for a provider.
-func (r *ModelRegistry) RegisterFallback(name string, models []Model, defaultModel Model) {
+// RegisterDefault stores the default model for a provider (used when a
+// request does not specify a model).
+func (r *ModelRegistry) RegisterDefault(name string, defaultModel Model) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.fallbackModels[name] = models
 	r.defaultModels[name] = defaultModel
 }
 
@@ -58,6 +60,19 @@ func (r *ModelRegistry) UnmarkConfigured(name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.configured, name)
+	delete(r.favourites, name)
+}
+
+// SetFavourites stores the admin-selected model IDs for a provider. An empty
+// list clears the selection (all fetched models are shown).
+func (r *ModelRegistry) SetFavourites(name string, ids []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(ids) == 0 {
+		delete(r.favourites, name)
+		return
+	}
+	r.favourites[name] = ids
 }
 
 // RegisterFetcher registers a dynamic model fetcher for a provider.
@@ -67,14 +82,11 @@ func (r *ModelRegistry) RegisterFetcher(name string, fetcher ModelFetcher) {
 	r.fetchers[name] = fetcher
 }
 
-// Models returns dynamic models if available, otherwise fallback.
+// Models returns the dynamically fetched models for a provider.
 func (r *ModelRegistry) Models(provider string) []Model {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if dyn, ok := r.dynamicModels[provider]; ok && len(dyn) > 0 {
-		return dyn
-	}
-	return r.fallbackModels[provider]
+	return r.dynamicModels[provider]
 }
 
 // DefaultModel returns the default model for a provider.
@@ -84,17 +96,31 @@ func (r *ModelRegistry) DefaultModel(provider string) Model {
 	return r.defaultModels[provider]
 }
 
-// AllModels returns models from all configured providers.
+// AllModels returns the user-visible models from all configured providers:
+// the provider's favourites if the admin selected any (in selection order),
+// otherwise all fetched models.
 func (r *ModelRegistry) AllModels() []Model {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	var out []Model
 	for name := range r.configured {
-		var models []Model
-		if dyn, ok := r.dynamicModels[name]; ok && len(dyn) > 0 {
-			models = dyn
-		} else if fb, ok := r.fallbackModels[name]; ok {
-			models = fb
+		models := r.dynamicModels[name]
+		if favs := r.favourites[name]; len(favs) > 0 {
+			byID := make(map[string]Model, len(models))
+			for _, m := range models {
+				byID[m.ID] = m
+			}
+			selected := make([]Model, 0, len(favs))
+			for _, id := range favs {
+				if m, ok := byID[id]; ok {
+					selected = append(selected, m)
+				} else {
+					// Favourite no longer in the fetched list — keep it
+					// selectable rather than silently dropping it.
+					selected = append(selected, Model{ID: id, Name: id})
+				}
+			}
+			models = selected
 		}
 		for _, m := range models {
 			m.Provider = name
@@ -104,9 +130,25 @@ func (r *ModelRegistry) AllModels() []Model {
 	return out
 }
 
+// fullModels returns all fetched models of configured providers, ignoring
+// favourites. Used for validation and routing so that a configured default
+// model outside the favourites still resolves.
+func (r *ModelRegistry) fullModels() []Model {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []Model
+	for name := range r.configured {
+		for _, m := range r.dynamicModels[name] {
+			m.Provider = name
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // ValidModel returns true if the given model ID is known across any provider.
 func (r *ModelRegistry) ValidModel(id string) bool {
-	for _, m := range r.AllModels() {
+	for _, m := range r.fullModels() {
 		if m.ID == id {
 			return true
 		}
@@ -116,7 +158,7 @@ func (r *ModelRegistry) ValidModel(id string) bool {
 
 // ProviderForModel returns the provider type that owns the given model ID, or "" if unknown.
 func (r *ModelRegistry) ProviderForModel(id string) string {
-	for _, m := range r.AllModels() {
+	for _, m := range r.fullModels() {
 		if m.ID == id {
 			return m.Provider
 		}
@@ -134,16 +176,32 @@ func (r *ModelRegistry) FetchAll(ctx context.Context) {
 	r.mu.RUnlock()
 
 	for name, fetcher := range fetchers {
-		models, err := fetcher.FetchModels(ctx)
-		if err != nil {
-			log.WithError(err).WithField("provider", name).Warn("failed to fetch models dynamically, using fallback")
-			continue
-		}
-		r.mu.Lock()
-		r.dynamicModels[name] = models
-		r.mu.Unlock()
-		log.WithFields(log.Fields{"provider": name, "count": len(models)}).Info("fetched dynamic models")
+		r.fetchProvider(ctx, name, fetcher)
 	}
+}
+
+// FetchProvider fetches models for a single provider if a fetcher is
+// registered. Returns the fetched models (or the cached ones on error).
+func (r *ModelRegistry) FetchProvider(ctx context.Context, name string) []Model {
+	r.mu.RLock()
+	fetcher := r.fetchers[name]
+	r.mu.RUnlock()
+	if fetcher != nil {
+		r.fetchProvider(ctx, name, fetcher)
+	}
+	return r.Models(name)
+}
+
+func (r *ModelRegistry) fetchProvider(ctx context.Context, name string, fetcher ModelFetcher) {
+	models, err := fetcher.FetchModels(ctx)
+	if err != nil {
+		log.WithError(err).WithField("provider", name).Warn("failed to fetch models dynamically")
+		return
+	}
+	r.mu.Lock()
+	r.dynamicModels[name] = models
+	r.mu.Unlock()
+	log.WithFields(log.Fields{"provider": name, "count": len(models)}).Info("fetched dynamic models")
 }
 
 // StartRefresh runs FetchAll on a periodic interval in the background.

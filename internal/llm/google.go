@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"google.golang.org/genai"
@@ -36,6 +37,9 @@ func (f *GoogleFetcher) FetchModels(ctx context.Context) ([]Model, error) {
 		if !strings.HasPrefix(name, "models/gemini") {
 			continue
 		}
+		if len(m.SupportedActions) > 0 && !slices.Contains(m.SupportedActions, "generateContent") {
+			continue
+		}
 		lower := strings.ToLower(name)
 		if strings.Contains(lower, "embedding") || strings.Contains(lower, "aqa") {
 			continue
@@ -47,17 +51,10 @@ func (f *GoogleFetcher) FetchModels(ctx context.Context) ([]Model, error) {
 		}
 		models = append(models, Model{ID: id, Name: displayName})
 	}
-	return models, nil
+	return FilterModels("google", models), nil
 }
 
-var GoogleModels = []Model{
-	{ID: "gemini-2.5-flash", Name: "Gemini 2.5 Flash"},
-	{ID: "gemini-2.5-pro", Name: "Gemini 2.5 Pro"},
-	{ID: "gemini-2.0-flash", Name: "Gemini 2.0 Flash"},
-	{ID: "gemini-2.0-flash-lite", Name: "Gemini 2.0 Flash Lite"},
-}
-
-var GoogleDefaultModel = GoogleModels[0] // Gemini 2.5 Flash
+var GoogleDefaultModel = Model{ID: "gemini-2.5-flash", Name: "Gemini 2.5 Flash"}
 
 type GoogleProvider struct {
 	client    *genai.Client
@@ -79,7 +76,6 @@ func NewGoogleProvider(apiKey string, maxTokens int64) *GoogleProvider {
 }
 
 func (p *GoogleProvider) Name() string        { return "google" }
-func (p *GoogleProvider) Models() []Model     { return GoogleModels }
 func (p *GoogleProvider) DefaultModel() Model { return GoogleDefaultModel }
 
 func (p *GoogleProvider) DoChat(ctx context.Context, model, systemPrompt string, messages []ChatMessage) (string, TokenUsage, error) {

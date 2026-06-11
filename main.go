@@ -325,15 +325,15 @@ func main() {
 
 	// --- Model registry ---
 	modelRegistry := llm.NewModelRegistry()
-	modelRegistry.RegisterFallback("anthropic", llm.AnthropicModels, llm.AnthropicDefaultModel)
-	modelRegistry.RegisterFallback("deepseek", llm.DeepSeekModels, llm.DeepSeekDefaultModel)
-	modelRegistry.RegisterFallback("google", llm.GoogleModels, llm.GoogleDefaultModel)
-	modelRegistry.RegisterFallback("meta", llm.MetaModels, llm.MetaDefaultModel)
-	modelRegistry.RegisterFallback("mistral", llm.MistralModels, llm.MistralDefaultModel)
-	modelRegistry.RegisterFallback("ollama", llm.OllamaModels, llm.OllamaDefaultModel)
-	modelRegistry.RegisterFallback("openai", llm.OpenAIModels, llm.OpenAIDefaultModel)
-	modelRegistry.RegisterFallback("perplexity", llm.PerplexityModels, llm.PerplexityDefaultModel)
-	modelRegistry.RegisterFallback("xai", llm.XAIModels, llm.XAIDefaultModel)
+	modelRegistry.RegisterDefault("anthropic", llm.AnthropicDefaultModel)
+	modelRegistry.RegisterDefault("deepseek", llm.DeepSeekDefaultModel)
+	modelRegistry.RegisterDefault("google", llm.GoogleDefaultModel)
+	modelRegistry.RegisterDefault("meta", llm.MetaDefaultModel)
+	modelRegistry.RegisterDefault("mistral", llm.MistralDefaultModel)
+	modelRegistry.RegisterDefault("ollama", llm.OllamaDefaultModel)
+	modelRegistry.RegisterDefault("openai", llm.OpenAIDefaultModel)
+	modelRegistry.RegisterDefault("perplexity", llm.PerplexityDefaultModel)
+	modelRegistry.RegisterDefault("xai", llm.XAIDefaultModel)
 
 	// --- LLM client from DB ---
 	llmClient := buildLLMClient(db, modelRegistry)
@@ -1221,6 +1221,10 @@ func main() {
 		fuego.OptionTags("Admin"),
 		fuego.OptionSummary("Add an LLM provider"),
 	)
+	fuegogin.Get(engine, adminLLMGroup, "/:name/models", adminHandler.GetLLMProviderModels,
+		fuego.OptionTags("Admin"),
+		fuego.OptionSummary("List available models of an LLM provider"),
+	)
 	fuegogin.Put(engine, adminLLMGroup, "/:name", adminHandler.UpdateLLMProvider,
 		fuego.OptionTags("Admin"),
 		fuego.OptionSummary("Update an LLM provider"),
@@ -1378,33 +1382,34 @@ func registerLLMProvider(client *llm.Client, registry *llm.ModelRegistry, cfg ll
 	switch provType {
 	case "openai":
 		provider = llm.NewOpenAIProvider(cfg.APIKey, maxTokens)
-		registry.RegisterFetcher(provType, llm.NewOpenAICompatFetcher(cfg.APIKey, ""))
+		registry.RegisterFetcher(provType, llm.NewOpenAICompatFetcher(provType, cfg.APIKey, ""))
 	case "deepseek":
 		provider = llm.NewDeepSeekProvider(cfg.APIKey, maxTokens)
-		registry.RegisterFetcher(provType, llm.NewOpenAICompatFetcher(cfg.APIKey, "https://api.deepseek.com"))
+		registry.RegisterFetcher(provType, llm.NewOpenAICompatFetcher(provType, cfg.APIKey, "https://api.deepseek.com"))
 	case "google":
 		provider = llm.NewGoogleProvider(cfg.APIKey, maxTokens)
 		registry.RegisterFetcher(provType, llm.NewGoogleFetcher(cfg.APIKey))
 	case "meta":
 		provider = llm.NewMetaProvider(cfg.APIKey, maxTokens)
-		registry.RegisterFetcher(provType, llm.NewOpenAICompatFetcher(cfg.APIKey, "https://api.llama.com/compat/v1"))
+		registry.RegisterFetcher(provType, llm.NewOpenAICompatFetcher(provType, cfg.APIKey, "https://api.llama.com/compat/v1"))
 	case "mistral":
 		provider = llm.NewMistralProvider(cfg.APIKey, maxTokens)
-		registry.RegisterFetcher(provType, llm.NewOpenAICompatFetcher(cfg.APIKey, "https://api.mistral.ai/v1"))
+		registry.RegisterFetcher(provType, llm.NewOpenAICompatFetcher(provType, cfg.APIKey, "https://api.mistral.ai/v1"))
 	case "perplexity":
 		provider = llm.NewPerplexityProvider(cfg.APIKey, maxTokens)
-		registry.RegisterFetcher(provType, llm.NewOpenAICompatFetcher(cfg.APIKey, "https://api.perplexity.ai"))
+		registry.RegisterFetcher(provType, llm.NewOpenAICompatFetcher(provType, cfg.APIKey, "https://api.perplexity.ai"))
 	case "xai":
 		provider = llm.NewXAIProvider(cfg.APIKey, maxTokens)
-		registry.RegisterFetcher(provType, llm.NewOpenAICompatFetcher(cfg.APIKey, "https://api.x.ai/v1"))
+		registry.RegisterFetcher(provType, llm.NewOpenAICompatFetcher(provType, cfg.APIKey, "https://api.x.ai/v1"))
 	case "ollama":
 		provider = llm.NewOllamaProvider(cfg.BaseURL, maxTokens)
-		registry.RegisterFetcher(provType, llm.NewOpenAICompatFetcher("ollama", cfg.BaseURL))
+		registry.RegisterFetcher(provType, llm.NewOpenAICompatFetcher(provType, "ollama", cfg.BaseURL))
 	default:
 		provider = llm.NewAnthropicProvider(cfg.APIKey, maxTokens)
 		registry.RegisterFetcher(provType, llm.NewAnthropicFetcher(cfg.APIKey))
 	}
 	registry.MarkConfigured(provType)
+	registry.SetFavourites(provType, cfg.FavouriteModels)
 	client.AddProvider(provType, provider)
 }
 

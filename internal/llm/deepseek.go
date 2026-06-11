@@ -8,12 +8,7 @@ import (
 	"github.com/openai/openai-go/v3/option"
 )
 
-var DeepSeekModels = []Model{
-	{ID: "deepseek-chat", Name: "DeepSeek V3"},
-	{ID: "deepseek-reasoner", Name: "DeepSeek R1"},
-}
-
-var DeepSeekDefaultModel = DeepSeekModels[0] // DeepSeek V3
+var DeepSeekDefaultModel = Model{ID: "deepseek-chat", Name: "DeepSeek V3"}
 
 type DeepSeekProvider struct {
 	client    openai.Client
@@ -31,7 +26,6 @@ func NewDeepSeekProvider(apiKey string, maxTokens int64) *DeepSeekProvider {
 }
 
 func (p *DeepSeekProvider) Name() string        { return "deepseek" }
-func (p *DeepSeekProvider) Models() []Model     { return DeepSeekModels }
 func (p *DeepSeekProvider) DefaultModel() Model { return DeepSeekDefaultModel }
 
 func (p *DeepSeekProvider) DoChat(ctx context.Context, model, systemPrompt string, messages []ChatMessage) (string, TokenUsage, error) {

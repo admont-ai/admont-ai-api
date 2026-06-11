@@ -11,7 +11,6 @@ import (
 
 type mockProvider struct {
 	name         string
-	models       []Model
 	defaultModel Model
 	doResult     string
 	doUsage      TokenUsage
@@ -19,7 +18,6 @@ type mockProvider struct {
 }
 
 func (p *mockProvider) Name() string        { return p.name }
-func (p *mockProvider) Models() []Model     { return p.models }
 func (p *mockProvider) DefaultModel() Model { return p.defaultModel }
 func (p *mockProvider) Do(ctx context.Context, model, systemPrompt, userPrompt string) (string, TokenUsage, error) {
 	return p.doResult, p.doUsage, p.doErr
@@ -44,9 +42,7 @@ func TestClient_AddProvider(t *testing.T) {
 
 func TestClient_AllModels(t *testing.T) {
 	reg := NewModelRegistry()
-	reg.RegisterFallback("openai", []Model{
-		{ID: "gpt-4", Provider: "openai"},
-	}, Model{ID: "gpt-4", Provider: "openai"})
+	setDynamic(reg, "openai", []Model{{ID: "gpt-4"}})
 	reg.MarkConfigured("openai")
 
 	c := NewClient(reg)
@@ -57,9 +53,7 @@ func TestClient_AllModels(t *testing.T) {
 
 func TestClient_ValidModel(t *testing.T) {
 	reg := NewModelRegistry()
-	reg.RegisterFallback("openai", []Model{
-		{ID: "gpt-4", Provider: "openai"},
-	}, Model{ID: "gpt-4", Provider: "openai"})
+	setDynamic(reg, "openai", []Model{{ID: "gpt-4"}})
 	reg.MarkConfigured("openai")
 
 	c := NewClient(reg)
@@ -69,9 +63,8 @@ func TestClient_ValidModel(t *testing.T) {
 
 func TestClient_Do_RoutesToCorrectProvider(t *testing.T) {
 	reg := NewModelRegistry()
-	reg.RegisterFallback("test", []Model{
-		{ID: "test-model", Provider: "test"},
-	}, Model{ID: "test-model", Provider: "test"})
+	setDynamic(reg, "test", []Model{{ID: "test-model"}})
+	reg.MarkConfigured("test")
 
 	c := NewClient(reg)
 	p := &mockProvider{
@@ -98,9 +91,8 @@ func TestClient_Do_NoProviderForModel(t *testing.T) {
 
 func TestClient_Do_ProviderError(t *testing.T) {
 	reg := NewModelRegistry()
-	reg.RegisterFallback("test", []Model{
-		{ID: "test-model", Provider: "test"},
-	}, Model{ID: "test-model", Provider: "test"})
+	setDynamic(reg, "test", []Model{{ID: "test-model"}})
+	reg.MarkConfigured("test")
 
 	c := NewClient(reg)
 	p := &mockProvider{
@@ -116,9 +108,8 @@ func TestClient_Do_ProviderError(t *testing.T) {
 
 func TestClient_DoChat(t *testing.T) {
 	reg := NewModelRegistry()
-	reg.RegisterFallback("test", []Model{
-		{ID: "test-model", Provider: "test"},
-	}, Model{ID: "test-model", Provider: "test"})
+	setDynamic(reg, "test", []Model{{ID: "test-model"}})
+	reg.MarkConfigured("test")
 
 	c := NewClient(reg)
 	p := &mockProvider{

@@ -5,45 +5,43 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
-func TestModelRegistry_RegisterFallback(t *testing.T) {
+type mockFetcher struct {
+	models []Model
+	err    error
+}
+
+func (f *mockFetcher) FetchModels(ctx context.Context) ([]Model, error) {
+	return f.models, f.err
+}
+
+// setDynamic loads models for a provider through the fetcher path.
+func setDynamic(r *ModelRegistry, provider string, models []Model) {
+	r.RegisterFetcher(provider, &mockFetcher{models: models})
+	r.FetchAll(context.Background())
+}
+
+func TestModelRegistry_RegisterDefault(t *testing.T) {
 	r := NewModelRegistry()
-	models := []Model{
-		{ID: "gpt-4", Name: "GPT-4", Provider: "openai"},
-		{ID: "gpt-3.5-turbo", Name: "GPT-3.5 Turbo", Provider: "openai"},
-	}
-	defaultModel := Model{ID: "gpt-4", Name: "GPT-4", Provider: "openai"}
-
-	r.RegisterFallback("openai", models, defaultModel)
-
-	got := r.Models("openai")
-	assert.Equal(t, 2, len(got))
+	r.RegisterDefault("openai", Model{ID: "gpt-4", Name: "GPT-4"})
 	assert.Equal(t, "gpt-4", r.DefaultModel("openai").ID)
 }
 
 func TestModelRegistry_ModelsUnknownProvider(t *testing.T) {
 	r := NewModelRegistry()
-	got := r.Models("unknown")
-	assert.Empty(t, got)
+	assert.Empty(t, r.Models("unknown"))
 }
 
 func TestModelRegistry_DefaultModelUnknownProvider(t *testing.T) {
 	r := NewModelRegistry()
-	got := r.DefaultModel("unknown")
-	assert.Equal(t, Model{}, got)
+	assert.Equal(t, Model{}, r.DefaultModel("unknown"))
 }
 
 func TestModelRegistry_AllModels(t *testing.T) {
 	r := NewModelRegistry()
-	r.RegisterFallback("openai", []Model{
-		{ID: "gpt-4", Name: "GPT-4", Provider: "openai"},
-	}, Model{ID: "gpt-4", Name: "GPT-4", Provider: "openai"})
-	r.RegisterFallback("anthropic", []Model{
-		{ID: "claude-3-opus", Name: "Claude 3 Opus", Provider: "anthropic"},
-	}, Model{ID: "claude-3-opus", Name: "Claude 3 Opus", Provider: "anthropic"})
-
+	setDynamic(r, "openai", []Model{{ID: "gpt-4", Name: "GPT-4"}})
+	setDynamic(r, "anthropic", []Model{{ID: "claude-x", Name: "Claude X"}})
 	r.MarkConfigured("openai")
 	r.MarkConfigured("anthropic")
 
@@ -55,142 +53,111 @@ func TestModelRegistry_AllModels(t *testing.T) {
 		ids[i] = m.ID
 	}
 	assert.Contains(t, ids, "gpt-4")
-	assert.Contains(t, ids, "claude-3-opus")
+	assert.Contains(t, ids, "claude-x")
 }
 
 func TestModelRegistry_AllModels_OnlyConfigured(t *testing.T) {
 	r := NewModelRegistry()
-	r.RegisterFallback("openai", []Model{
-		{ID: "gpt-4", Provider: "openai"},
-	}, Model{ID: "gpt-4", Provider: "openai"})
-	r.RegisterFallback("anthropic", []Model{
-		{ID: "claude-3-opus", Provider: "anthropic"},
-	}, Model{ID: "claude-3-opus", Provider: "anthropic"})
-
+	setDynamic(r, "openai", []Model{{ID: "gpt-4"}})
+	setDynamic(r, "anthropic", []Model{{ID: "claude-x"}})
 	r.MarkConfigured("openai")
 
-	all := r.AllModels()
-	ids := make([]string, len(all))
-	for i, m := range all {
-		ids[i] = m.ID
+	ids := make([]string, 0)
+	for _, m := range r.AllModels() {
+		ids = append(ids, m.ID)
 	}
 	assert.Contains(t, ids, "gpt-4")
-	assert.NotContains(t, ids, "claude-3-opus")
+	assert.NotContains(t, ids, "claude-x")
 }
 
-func TestModelRegistry_ValidModel(t *testing.T) {
+func TestModelRegistry_AllModels_Favourites(t *testing.T) {
 	r := NewModelRegistry()
-	r.RegisterFallback("openai", []Model{
-		{ID: "gpt-4", Provider: "openai"},
-	}, Model{ID: "gpt-4", Provider: "openai"})
+	setDynamic(r, "openai", []Model{
+		{ID: "gpt-4", Name: "GPT-4"},
+		{ID: "gpt-5", Name: "GPT-5"},
+		{ID: "o3", Name: "o3"},
+	})
 	r.MarkConfigured("openai")
+	r.SetFavourites("openai", []string{"o3", "gpt-5"})
 
+	all := r.AllModels()
+	assert.Equal(t, 2, len(all))
+	// Favourite order is preserved.
+	assert.Equal(t, "o3", all[0].ID)
+	assert.Equal(t, "gpt-5", all[1].ID)
+
+	// A favourite missing from the fetched list stays selectable.
+	r.SetFavourites("openai", []string{"gpt-9"})
+	all = r.AllModels()
+	assert.Equal(t, 1, len(all))
+	assert.Equal(t, "gpt-9", all[0].ID)
+
+	// Clearing favourites restores the full list.
+	r.SetFavourites("openai", nil)
+	assert.Equal(t, 3, len(r.AllModels()))
+}
+
+func TestModelRegistry_ValidModel_IgnoresFavourites(t *testing.T) {
+	r := NewModelRegistry()
+	setDynamic(r, "openai", []Model{{ID: "gpt-4"}, {ID: "o3"}})
+	r.MarkConfigured("openai")
+	r.SetFavourites("openai", []string{"o3"})
+
+	// gpt-4 is not a favourite but must remain valid for routing.
 	assert.True(t, r.ValidModel("gpt-4"))
+	assert.True(t, r.ValidModel("o3"))
 	assert.False(t, r.ValidModel("nonexistent"))
 }
 
 func TestModelRegistry_ProviderForModel(t *testing.T) {
 	r := NewModelRegistry()
-	r.RegisterFallback("openai", []Model{
-		{ID: "gpt-4", Provider: "openai"},
-	}, Model{ID: "gpt-4", Provider: "openai"})
-	r.RegisterFallback("anthropic", []Model{
-		{ID: "claude-3-opus", Provider: "anthropic"},
-	}, Model{ID: "claude-3-opus", Provider: "anthropic"})
+	setDynamic(r, "openai", []Model{{ID: "gpt-4"}})
+	setDynamic(r, "anthropic", []Model{{ID: "claude-x"}})
 	r.MarkConfigured("openai")
 	r.MarkConfigured("anthropic")
 
 	assert.Equal(t, "openai", r.ProviderForModel("gpt-4"))
-	assert.Equal(t, "anthropic", r.ProviderForModel("claude-3-opus"))
+	assert.Equal(t, "anthropic", r.ProviderForModel("claude-x"))
 	assert.Equal(t, "", r.ProviderForModel("nonexistent"))
 }
 
 func TestModelRegistry_MarkUnmarkConfigured(t *testing.T) {
 	r := NewModelRegistry()
-	r.RegisterFallback("openai", []Model{
-		{ID: "gpt-4", Provider: "openai"},
-	}, Model{ID: "gpt-4", Provider: "openai"})
+	setDynamic(r, "openai", []Model{{ID: "gpt-4"}})
 
 	r.MarkConfigured("openai")
-	all := r.AllModels()
-	assert.Equal(t, 1, len(all))
+	r.SetFavourites("openai", []string{"gpt-4"})
+	assert.Equal(t, 1, len(r.AllModels()))
 
 	r.UnmarkConfigured("openai")
-	all = r.AllModels()
-	assert.Equal(t, 0, len(all))
+	assert.Equal(t, 0, len(r.AllModels()))
+
+	// Favourites were cleared along with the configuration.
+	r.MarkConfigured("openai")
+	assert.Equal(t, 1, len(r.AllModels()))
+	assert.Equal(t, "gpt-4", r.AllModels()[0].ID)
 }
 
-func TestModelRegistry_DynamicModelsFetcher(t *testing.T) {
+func TestModelRegistry_FetcherError_KeepsCachedModels(t *testing.T) {
 	r := NewModelRegistry()
-	r.RegisterFallback("test", []Model{
-		{ID: "fallback-model", Provider: "test"},
-	}, Model{ID: "fallback-model", Provider: "test"})
+	setDynamic(r, "test", []Model{{ID: "cached"}})
 
-	fetcher := &mockFetcher{
-		models: []Model{
-			{ID: "dynamic-1", Name: "Dynamic 1", Provider: "test"},
-			{ID: "dynamic-2", Name: "Dynamic 2", Provider: "test"},
-		},
-	}
-	r.RegisterFetcher("test", fetcher)
-
-	ctx := context.Background()
-	r.FetchAll(ctx)
-
-	models := r.Models("test")
-	assert.Equal(t, 2, len(models))
-	assert.Equal(t, "dynamic-1", models[0].ID)
-}
-
-func TestModelRegistry_FallbackWhenFetcherFails(t *testing.T) {
-	r := NewModelRegistry()
-	r.RegisterFallback("test", []Model{
-		{ID: "fallback-model", Provider: "test"},
-	}, Model{ID: "fallback-model", Provider: "test"})
-
-	fetcher := &mockFetcher{err: assert.AnError}
-	r.RegisterFetcher("test", fetcher)
-
-	ctx := context.Background()
-	r.FetchAll(ctx)
+	r.RegisterFetcher("test", &mockFetcher{err: assert.AnError})
+	r.FetchAll(context.Background())
 
 	models := r.Models("test")
 	assert.Equal(t, 1, len(models))
-	assert.Equal(t, "fallback-model", models[0].ID)
+	assert.Equal(t, "cached", models[0].ID)
 }
 
-type mockFetcher struct {
-	models []Model
-	err    error
-}
+func TestModelRegistry_FetchProvider(t *testing.T) {
+	r := NewModelRegistry()
+	r.RegisterFetcher("test", &mockFetcher{models: []Model{{ID: "fresh"}}})
 
-func (f *mockFetcher) FetchModels(ctx context.Context) ([]Model, error) {
-	return f.models, f.err
-}
+	models := r.FetchProvider(context.Background(), "test")
+	assert.Equal(t, 1, len(models))
+	assert.Equal(t, "fresh", models[0].ID)
 
-func TestModelRegistry_BuiltInModelLists(t *testing.T) {
-	lists := map[string][]Model{
-		"anthropic":  AnthropicModels,
-		"openai":     OpenAIModels,
-		"google":     GoogleModels,
-		"deepseek":   DeepSeekModels,
-		"meta":       MetaModels,
-		"mistral":    MistralModels,
-		"perplexity": PerplexityModels,
-		"xai":        XAIModels,
-	}
-
-	for provider, models := range lists {
-		t.Run(provider, func(t *testing.T) {
-			require.True(t, len(models) > 0, "%s should have at least one model", provider)
-
-			seen := make(map[string]bool)
-			for _, m := range models {
-				assert.NotEmpty(t, m.ID, "model ID should not be empty")
-				assert.NotEmpty(t, m.Name, "model Name should not be empty")
-				assert.False(t, seen[m.ID], "duplicate model ID in %s: %s", provider, m.ID)
-				seen[m.ID] = true
-			}
-		})
-	}
+	// Unknown provider returns whatever is cached (nothing).
+	assert.Empty(t, r.FetchProvider(context.Background(), "unknown"))
 }

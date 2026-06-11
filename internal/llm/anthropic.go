@@ -29,23 +29,15 @@ func (f *AnthropicFetcher) FetchModels(ctx context.Context) ([]Model, error) {
 		if name == "" {
 			name = m.ID
 		}
-		models = append(models, Model{ID: m.ID, Name: name})
+		models = append(models, Model{ID: m.ID, Name: name, Created: m.CreatedAt.Unix()})
 	}
 	if err := pager.Err(); err != nil {
 		return nil, fmt.Errorf("anthropic models list: %w", err)
 	}
-	return models, nil
+	return FilterModels("anthropic", models), nil
 }
 
-var AnthropicModels = []Model{
-	{ID: string(anthropic.ModelClaudeHaiku4_5), Name: "Claude Haiku 4.5"},
-	{ID: string(anthropic.ModelClaudeSonnet4_5), Name: "Claude Sonnet 4.5"},
-	{ID: string(anthropic.ModelClaudeSonnet4_6), Name: "Claude Sonnet 4.6"},
-	{ID: string(anthropic.ModelClaudeOpus4_5), Name: "Claude Opus 4.5"},
-	{ID: string(anthropic.ModelClaudeOpus4_6), Name: "Claude Opus 4.6"},
-}
-
-var AnthropicDefaultModel = AnthropicModels[1] // Claude Sonnet 4.5
+var AnthropicDefaultModel = Model{ID: string(anthropic.ModelClaudeSonnet4_5), Name: "Claude Sonnet 4.5"}
 
 type AnthropicProvider struct {
 	client    anthropic.Client
@@ -60,7 +52,6 @@ func NewAnthropicProvider(apiKey string, maxTokens int64) *AnthropicProvider {
 }
 
 func (p *AnthropicProvider) Name() string        { return "anthropic" }
-func (p *AnthropicProvider) Models() []Model     { return AnthropicModels }
 func (p *AnthropicProvider) DefaultModel() Model { return AnthropicDefaultModel }
 
 func (p *AnthropicProvider) DoChat(ctx context.Context, model, systemPrompt string, messages []ChatMessage) (string, TokenUsage, error) {

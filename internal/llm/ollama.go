@@ -8,16 +8,7 @@ import (
 	"github.com/openai/openai-go/v3/option"
 )
 
-var OllamaModels = []Model{
-	{ID: "llama3.2:3b", Name: "Llama 3.2 3B"},
-	{ID: "llama3.2:1b", Name: "Llama 3.2 1B"},
-	{ID: "llama3.1:8b", Name: "Llama 3.1 8B"},
-	{ID: "phi3:mini", Name: "Phi-3 Mini"},
-	{ID: "mistral:7b", Name: "Mistral 7B"},
-	{ID: "gemma2:2b", Name: "Gemma 2 2B"},
-}
-
-var OllamaDefaultModel = OllamaModels[0] // llama3.2:3b
+var OllamaDefaultModel = Model{ID: "llama3.2:3b", Name: "Llama 3.2 3B"}
 
 type OllamaProvider struct {
 	client    openai.Client
@@ -38,7 +29,6 @@ func NewOllamaProvider(baseURL string, maxTokens int64) *OllamaProvider {
 }
 
 func (p *OllamaProvider) Name() string        { return "ollama" }
-func (p *OllamaProvider) Models() []Model     { return OllamaModels }
 func (p *OllamaProvider) DefaultModel() Model { return OllamaDefaultModel }
 
 func (p *OllamaProvider) DoChat(ctx context.Context, model, systemPrompt string, messages []ChatMessage) (string, TokenUsage, error) {

@@ -8,15 +8,7 @@ import (
 	"github.com/openai/openai-go/v3/option"
 )
 
-var XAIModels = []Model{
-	{ID: "grok-3", Name: "Grok 3"},
-	{ID: "grok-3-fast", Name: "Grok 3 Fast"},
-	{ID: "grok-3-mini", Name: "Grok 3 Mini"},
-	{ID: "grok-3-mini-fast", Name: "Grok 3 Mini Fast"},
-	{ID: "grok-2", Name: "Grok 2"},
-}
-
-var XAIDefaultModel = XAIModels[0] // Grok 3
+var XAIDefaultModel = Model{ID: "grok-3", Name: "Grok 3"}
 
 type XAIProvider struct {
 	client    openai.Client
@@ -34,7 +26,6 @@ func NewXAIProvider(apiKey string, maxTokens int64) *XAIProvider {
 }
 
 func (p *XAIProvider) Name() string        { return "xai" }
-func (p *XAIProvider) Models() []Model     { return XAIModels }
 func (p *XAIProvider) DefaultModel() Model { return XAIDefaultModel }
 
 func (p *XAIProvider) DoChat(ctx context.Context, model, systemPrompt string, messages []ChatMessage) (string, TokenUsage, error) {

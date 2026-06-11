@@ -40,15 +40,16 @@ CREATE TABLE auth_providers (
 );
 
 CREATE TABLE llm_providers (
-    id            SERIAL PRIMARY KEY,
-    name          TEXT NOT NULL UNIQUE,
-    provider_type TEXT NOT NULL,
-    api_key       TEXT NOT NULL DEFAULT '',
-    base_url      TEXT NOT NULL DEFAULT '',
-    max_tokens    BIGINT NOT NULL DEFAULT 0,
-    default_model TEXT NOT NULL DEFAULT '',
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    id               SERIAL PRIMARY KEY,
+    name             TEXT NOT NULL UNIQUE,
+    provider_type    TEXT NOT NULL,
+    api_key          TEXT NOT NULL DEFAULT '',
+    base_url         TEXT NOT NULL DEFAULT '',
+    max_tokens       BIGINT NOT NULL DEFAULT 0,
+    default_model    TEXT NOT NULL DEFAULT '',
+    favourite_models TEXT[] NOT NULL DEFAULT '{}',
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE search_providers (

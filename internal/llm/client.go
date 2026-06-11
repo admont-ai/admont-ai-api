@@ -11,6 +11,9 @@ type Model struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
 	Provider string `json:"provider,omitempty"`
+	// Created is the unix timestamp the provider reports for the model's
+	// release, or 0 if the provider API does not expose one.
+	Created int64 `json:"created,omitempty"`
 }
 
 // TokenUsage tracks token consumption for a request.

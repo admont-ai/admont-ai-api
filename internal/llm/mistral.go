@@ -8,16 +8,7 @@ import (
 	"github.com/openai/openai-go/v3/option"
 )
 
-var MistralModels = []Model{
-	{ID: "mistral-large-latest", Name: "Mistral Large"},
-	{ID: "mistral-medium-latest", Name: "Mistral Medium"},
-	{ID: "mistral-small-latest", Name: "Mistral Small"},
-	{ID: "codestral-latest", Name: "Codestral"},
-	{ID: "ministral-8b-latest", Name: "Ministral 8B"},
-	{ID: "ministral-3b-latest", Name: "Ministral 3B"},
-}
-
-var MistralDefaultModel = MistralModels[0] // Mistral Large
+var MistralDefaultModel = Model{ID: "mistral-large-latest", Name: "Mistral Large"}
 
 type MistralProvider struct {
 	client    openai.Client
@@ -35,7 +26,6 @@ func NewMistralProvider(apiKey string, maxTokens int64) *MistralProvider {
 }
 
 func (p *MistralProvider) Name() string        { return "mistral" }
-func (p *MistralProvider) Models() []Model     { return MistralModels }
 func (p *MistralProvider) DefaultModel() Model { return MistralDefaultModel }
 
 func (p *MistralProvider) DoChat(ctx context.Context, model, systemPrompt string, messages []ChatMessage) (string, TokenUsage, error) {
