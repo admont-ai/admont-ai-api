@@ -54,7 +54,7 @@ func NewAnthropicProvider(apiKey string, maxTokens int64) *AnthropicProvider {
 func (p *AnthropicProvider) Name() string        { return "anthropic" }
 func (p *AnthropicProvider) DefaultModel() Model { return AnthropicDefaultModel }
 
-func (p *AnthropicProvider) DoChat(ctx context.Context, model, systemPrompt string, messages []ChatMessage) (string, TokenUsage, error) {
+func (p *AnthropicProvider) DoChat(ctx context.Context, model, systemPrompt string, messages []ChatMessage, maxTokens int64) (string, TokenUsage, error) {
 	if model == "" {
 		model = AnthropicDefaultModel.ID
 	}
@@ -69,7 +69,7 @@ func (p *AnthropicProvider) DoChat(ctx context.Context, model, systemPrompt stri
 	}
 	msg, err := p.client.Messages.New(ctx, anthropic.MessageNewParams{
 		Model:     anthropic.Model(model),
-		MaxTokens: p.maxTokens,
+		MaxTokens: effectiveTokens(maxTokens, p.maxTokens),
 		System:    []anthropic.TextBlockParam{{Text: systemPrompt}},
 		Messages:  msgs,
 	})
@@ -85,13 +85,13 @@ func (p *AnthropicProvider) DoChat(ctx context.Context, model, systemPrompt stri
 	return "", usage, fmt.Errorf("no text content in anthropic response")
 }
 
-func (p *AnthropicProvider) Do(ctx context.Context, model, systemPrompt, userPrompt string) (string, TokenUsage, error) {
+func (p *AnthropicProvider) Do(ctx context.Context, model, systemPrompt, userPrompt string, maxTokens int64) (string, TokenUsage, error) {
 	if model == "" {
 		model = AnthropicDefaultModel.ID
 	}
 	msg, err := p.client.Messages.New(ctx, anthropic.MessageNewParams{
 		Model:     anthropic.Model(model),
-		MaxTokens: p.maxTokens,
+		MaxTokens: effectiveTokens(maxTokens, p.maxTokens),
 		System: []anthropic.TextBlockParam{
 			{Text: systemPrompt},
 		},

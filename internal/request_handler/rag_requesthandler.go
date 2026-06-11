@@ -233,9 +233,9 @@ func (h *RAGRequesthandler) RAG(c fuego.ContextWithBody[ragRequest]) (ragRespons
 		messages := make([]llm.ChatMessage, 0, len(body.History)+1)
 		messages = append(messages, body.History...)
 		messages = append(messages, llm.ChatMessage{Role: "user", Content: userPrompt})
-		answer, usage, err = client.DoChat(gc.Request.Context(), body.Model, systemPrompt, messages)
+		answer, usage, err = client.DoChat(gc.Request.Context(), body.Model, systemPrompt, messages, client.LimitFor("ask"))
 	} else {
-		answer, usage, err = client.Do(gc.Request.Context(), body.Model, systemPrompt, userPrompt)
+		answer, usage, err = client.Do(gc.Request.Context(), body.Model, systemPrompt, userPrompt, client.LimitFor("ask"))
 	}
 	if err != nil {
 		log.WithError(err).Warn("RAG LLM call failed")

@@ -2,7 +2,6 @@ package llm
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -28,37 +27,16 @@ func NewMistralProvider(apiKey string, maxTokens int64) *MistralProvider {
 func (p *MistralProvider) Name() string        { return "mistral" }
 func (p *MistralProvider) DefaultModel() Model { return MistralDefaultModel }
 
-func (p *MistralProvider) DoChat(ctx context.Context, model, systemPrompt string, messages []ChatMessage) (string, TokenUsage, error) {
+func (p *MistralProvider) DoChat(ctx context.Context, model, systemPrompt string, messages []ChatMessage, maxTokens int64) (string, TokenUsage, error) {
 	if model == "" {
 		model = MistralDefaultModel.ID
 	}
-	return doOpenAICompatChat(ctx, p.client, model, p.maxTokens, systemPrompt, messages, "mistral")
+	return doOpenAICompatChat(ctx, p.client, model, effectiveTokens(maxTokens, p.maxTokens), systemPrompt, messages, "mistral")
 }
 
-func (p *MistralProvider) Do(ctx context.Context, model, systemPrompt, userPrompt string) (string, TokenUsage, error) {
+func (p *MistralProvider) Do(ctx context.Context, model, systemPrompt, userPrompt string, maxTokens int64) (string, TokenUsage, error) {
 	if model == "" {
 		model = MistralDefaultModel.ID
 	}
-	resp, err := p.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
-		Model:               openai.ChatModel(model),
-		MaxCompletionTokens: openai.Int(p.maxTokens),
-		Messages: []openai.ChatCompletionMessageParamUnion{
-			openai.SystemMessage(systemPrompt),
-			openai.UserMessage(userPrompt),
-		},
-	})
-	if err != nil {
-		return "", TokenUsage{}, fmt.Errorf("mistral API call: %w", err)
-	}
-
-	usage := TokenUsage{
-		InputTokens:  resp.Usage.PromptTokens,
-		OutputTokens: resp.Usage.CompletionTokens,
-	}
-
-	if len(resp.Choices) == 0 {
-		return "", usage, fmt.Errorf("no choices in mistral response")
-	}
-
-	return resp.Choices[0].Message.Content, usage, nil
+	return doOpenAICompatDo(ctx, p.client, model, effectiveTokens(maxTokens, p.maxTokens), systemPrompt, userPrompt, "mistral")
 }

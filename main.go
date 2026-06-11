@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"image/png"
 	"os"
@@ -1221,6 +1222,14 @@ func main() {
 		fuego.OptionTags("Admin"),
 		fuego.OptionSummary("Add an LLM provider"),
 	)
+	fuegogin.Get(engine, adminLLMGroup, "/token-limits", adminHandler.GetLLMTokenLimits,
+		fuego.OptionTags("Admin"),
+		fuego.OptionSummary("Get per-action LLM token limits"),
+	)
+	fuegogin.Put(engine, adminLLMGroup, "/token-limits", adminHandler.SetLLMTokenLimits,
+		fuego.OptionTags("Admin"),
+		fuego.OptionSummary("Set per-action LLM token limits"),
+	)
 	fuegogin.Get(engine, adminLLMGroup, "/:name/models", adminHandler.GetLLMProviderModels,
 		fuego.OptionTags("Admin"),
 		fuego.OptionSummary("List available models of an LLM provider"),
@@ -1352,6 +1361,10 @@ func initSearchBackend(providerType string, providerConfig map[string]string, fa
 	}
 }
 
+// llmTokenLimitsKey is the settings key holding the per-action output-token
+// limits as JSON, e.g. {"ask":4096,"generate":32768,"summarize":1024,"edit":8192}.
+const llmTokenLimitsKey = "llm_token_limits"
+
 // buildLLMClient creates an LLM client from all providers stored in the database.
 func buildLLMClient(db *store.Store, registry *llm.ModelRegistry) *llm.Client {
 	providers, err := db.LLM.ListLLMProviders(context.Background())
@@ -1367,6 +1380,15 @@ func buildLLMClient(db *store.Store, registry *llm.ModelRegistry) *llm.Client {
 		}
 		registerLLMProvider(client, registry, cfg)
 		log.WithFields(log.Fields{"name": cfg.Name, "type": cfg.ProviderType}).Info("LLM provider loaded")
+	}
+
+	if raw, err := db.GetSetting(context.Background(), llmTokenLimitsKey); err == nil && raw != "" {
+		var limits map[string]int64
+		if err := json.Unmarshal([]byte(raw), &limits); err == nil {
+			client.SetActionLimits(limits)
+		} else {
+			log.WithError(err).Warn("invalid llm_token_limits setting, ignoring")
+		}
 	}
 	return client
 }

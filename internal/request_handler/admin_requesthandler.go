@@ -2,6 +2,7 @@ package requesthandler
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1956,6 +1957,60 @@ func (h *AdminRequesthandler) GetLLMProviders(c fuego.ContextNoBody) ([]llmProvi
 		})
 	}
 	return out, nil
+}
+
+// --- LLM token limits ---
+
+// llmTokenLimitsSettingKey must match the key read in buildLLMClient (main.go).
+const llmTokenLimitsSettingKey = "llm_token_limits"
+
+// llmTokenLimits holds per-action output-token limits. 0 = provider ceiling.
+type llmTokenLimits struct {
+	Ask       int64 `json:"ask"`
+	Generate  int64 `json:"generate"`
+	Summarize int64 `json:"summarize"`
+	Edit      int64 `json:"edit"`
+}
+
+// GetLLMTokenLimits returns the configured per-action output-token limits.
+func (h *AdminRequesthandler) GetLLMTokenLimits(c fuego.ContextNoBody) (llmTokenLimits, error) {
+	var limits llmTokenLimits
+	raw, err := h.store.GetSetting(context.Background(), llmTokenLimitsSettingKey)
+	if err != nil {
+		return llmTokenLimits{}, fuego.InternalServerError{Detail: fmt.Sprintf("loading token limits: %v", err)}
+	}
+	if raw != "" {
+		if err := json.Unmarshal([]byte(raw), &limits); err != nil {
+			log.WithError(err).Warn("invalid llm_token_limits setting")
+		}
+	}
+	return limits, nil
+}
+
+// SetLLMTokenLimits stores the per-action output-token limits and reloads the LLM client.
+func (h *AdminRequesthandler) SetLLMTokenLimits(c fuego.ContextWithBody[llmTokenLimits]) (llmTokenLimits, error) {
+	body, err := c.Body()
+	if err != nil {
+		return llmTokenLimits{}, fuego.BadRequestError{Detail: "invalid request body"}
+	}
+	if body.Ask < 0 || body.Generate < 0 || body.Summarize < 0 || body.Edit < 0 {
+		return llmTokenLimits{}, fuego.BadRequestError{Detail: "token limits must not be negative"}
+	}
+
+	data, err := json.Marshal(body)
+	if err != nil {
+		return llmTokenLimits{}, fuego.InternalServerError{Detail: "encoding token limits"}
+	}
+	if err := h.store.SetSetting(context.Background(), llmTokenLimitsSettingKey, string(data)); err != nil {
+		return llmTokenLimits{}, fuego.InternalServerError{Detail: fmt.Sprintf("saving token limits: %v", err)}
+	}
+
+	if h.llmRebuild != nil {
+		h.llmRebuild()
+	}
+	log.WithFields(log.Fields{"ask": body.Ask, "generate": body.Generate, "summarize": body.Summarize, "edit": body.Edit}).
+		Info("LLM token limits updated via admin API")
+	return body, nil
 }
 
 // GetLLMProviderModels returns the full (filtered) model list of a configured

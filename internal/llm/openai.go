@@ -25,7 +25,7 @@ func NewOpenAIProvider(apiKey string, maxTokens int64) *OpenAIProvider {
 func (p *OpenAIProvider) Name() string        { return "openai" }
 func (p *OpenAIProvider) DefaultModel() Model { return OpenAIDefaultModel }
 
-func (p *OpenAIProvider) DoChat(ctx context.Context, model, systemPrompt string, messages []ChatMessage) (string, TokenUsage, error) {
+func (p *OpenAIProvider) DoChat(ctx context.Context, model, systemPrompt string, messages []ChatMessage, maxTokens int64) (string, TokenUsage, error) {
 	if model == "" {
 		model = OpenAIDefaultModel.ID
 	}
@@ -42,7 +42,7 @@ func (p *OpenAIProvider) DoChat(ctx context.Context, model, systemPrompt string,
 	}
 	resp, err := p.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
 		Model:               openai.ChatModel(model),
-		MaxCompletionTokens: openai.Int(p.maxTokens),
+		MaxCompletionTokens: openai.Int(effectiveTokens(maxTokens, p.maxTokens)),
 		Messages:            msgs,
 	})
 	if err != nil {
@@ -55,13 +55,13 @@ func (p *OpenAIProvider) DoChat(ctx context.Context, model, systemPrompt string,
 	return resp.Choices[0].Message.Content, usage, nil
 }
 
-func (p *OpenAIProvider) Do(ctx context.Context, model, systemPrompt, userPrompt string) (string, TokenUsage, error) {
+func (p *OpenAIProvider) Do(ctx context.Context, model, systemPrompt, userPrompt string, maxTokens int64) (string, TokenUsage, error) {
 	if model == "" {
 		model = OpenAIDefaultModel.ID
 	}
 	resp, err := p.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
 		Model:               openai.ChatModel(model),
-		MaxCompletionTokens: openai.Int(p.maxTokens),
+		MaxCompletionTokens: openai.Int(effectiveTokens(maxTokens, p.maxTokens)),
 		Messages: []openai.ChatCompletionMessageParamUnion{
 			openai.DeveloperMessage(systemPrompt),
 			openai.UserMessage(userPrompt),

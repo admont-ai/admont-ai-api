@@ -113,7 +113,7 @@ func (h *LLMRequesthandler) HandleLLM(c fuego.ContextWithBody[llmRequest]) (llmR
 			return llmResponse{}, fuego.BadRequestError{Detail: "prompt is required for ask"}
 		}
 		system := "You are a helpful assistant for a markdown wiki. Answer the user's question clearly and concisely. Use markdown formatting."
-		result, usage, err := client.Do(ctx, body.Model, system, body.Prompt)
+		result, usage, err := client.Do(ctx, body.Model, system, body.Prompt, client.LimitFor("ask"))
 		if err != nil {
 			return llmResponse{}, llmError("ask", err)
 		}
@@ -127,7 +127,7 @@ func (h *LLMRequesthandler) HandleLLM(c fuego.ContextWithBody[llmRequest]) (llmR
 		if !ok {
 			system = generateSystemPrompts["markdown"]
 		}
-		result, usage, err := client.Do(ctx, body.Model, system, body.Prompt)
+		result, usage, err := client.Do(ctx, body.Model, system, body.Prompt, client.LimitFor("generate"))
 		if err != nil {
 			return llmResponse{}, llmError("generate", err)
 		}
@@ -143,7 +143,7 @@ func (h *LLMRequesthandler) HandleLLM(c fuego.ContextWithBody[llmRequest]) (llmR
 			return llmResponse{}, fuego.BadRequestError{Detail: "content is required for summarize"}
 		}
 		system := "Summarize the following text. Be concise and capture the key points. Use markdown formatting with bullet points where appropriate."
-		result, usage, err := client.Do(ctx, body.Model, system, body.Content)
+		result, usage, err := client.Do(ctx, body.Model, system, body.Content, client.LimitFor("summarize"))
 		if err != nil {
 			return llmResponse{}, llmError("summarize", err)
 		}
@@ -209,7 +209,7 @@ func (h *LLMRequesthandler) doEdit(ctx context.Context, model, content, task, in
 	if c == nil || !c.HasProviders() {
 		return llmResponse{}, fuego.HTTPError{Status: http.StatusNotImplemented, Detail: "LLM not configured"}
 	}
-	result, usage, err := c.Do(ctx, model, system, userMessage)
+	result, usage, err := c.Do(ctx, model, system, userMessage, c.LimitFor("edit"))
 	if err != nil {
 		return llmResponse{}, llmError("edit", err)
 	}

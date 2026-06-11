@@ -19,10 +19,10 @@ type mockProvider struct {
 
 func (p *mockProvider) Name() string        { return p.name }
 func (p *mockProvider) DefaultModel() Model { return p.defaultModel }
-func (p *mockProvider) Do(ctx context.Context, model, systemPrompt, userPrompt string) (string, TokenUsage, error) {
+func (p *mockProvider) Do(ctx context.Context, model, systemPrompt, userPrompt string, maxTokens int64) (string, TokenUsage, error) {
 	return p.doResult, p.doUsage, p.doErr
 }
-func (p *mockProvider) DoChat(ctx context.Context, model, systemPrompt string, messages []ChatMessage) (string, TokenUsage, error) {
+func (p *mockProvider) DoChat(ctx context.Context, model, systemPrompt string, messages []ChatMessage, maxTokens int64) (string, TokenUsage, error) {
 	return p.doResult, p.doUsage, p.doErr
 }
 
@@ -74,7 +74,7 @@ func TestClient_Do_RoutesToCorrectProvider(t *testing.T) {
 	}
 	c.AddProvider("test", p)
 
-	result, usage, err := c.Do(context.Background(), "test-model", "system", "user")
+	result, usage, err := c.Do(context.Background(), "test-model", "system", "user", 0)
 	require.NoError(t, err)
 	assert.Equal(t, "response text", result)
 	assert.Equal(t, int64(100), usage.InputTokens)
@@ -85,7 +85,7 @@ func TestClient_Do_NoProviderForModel(t *testing.T) {
 	reg := NewModelRegistry()
 	c := NewClient(reg)
 
-	_, _, err := c.Do(context.Background(), "nonexistent", "system", "user")
+	_, _, err := c.Do(context.Background(), "nonexistent", "system", "user", 0)
 	assert.Error(t, err)
 }
 
@@ -101,7 +101,7 @@ func TestClient_Do_ProviderError(t *testing.T) {
 	}
 	c.AddProvider("test", p)
 
-	_, _, err := c.Do(context.Background(), "test-model", "system", "user")
+	_, _, err := c.Do(context.Background(), "test-model", "system", "user", 0)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "API error")
 }
@@ -122,7 +122,7 @@ func TestClient_DoChat(t *testing.T) {
 	messages := []ChatMessage{
 		{Role: "user", Content: "hello"},
 	}
-	result, usage, err := c.DoChat(context.Background(), "test-model", "system", messages)
+	result, usage, err := c.DoChat(context.Background(), "test-model", "system", messages, 0)
 	require.NoError(t, err)
 	assert.Equal(t, "chat response", result)
 	assert.Equal(t, int64(200), usage.InputTokens)
@@ -136,4 +136,21 @@ func TestClient_HasProviders(t *testing.T) {
 
 	c.AddProvider("test", &mockProvider{name: "test"})
 	assert.True(t, c.HasProviders())
+}
+
+func TestEffectiveTokens(t *testing.T) {
+	assert.Equal(t, int64(16384), effectiveTokens(0, 16384), "unset request uses ceiling")
+	assert.Equal(t, int64(4096), effectiveTokens(4096, 16384), "request below ceiling wins")
+	assert.Equal(t, int64(16384), effectiveTokens(32768, 16384), "request above ceiling is capped")
+	assert.Equal(t, int64(16384), effectiveTokens(-1, 16384), "negative request uses ceiling")
+}
+
+func TestClient_ActionLimits(t *testing.T) {
+	c := NewClient(NewModelRegistry())
+	assert.Equal(t, int64(0), c.LimitFor("ask"), "unset limits return 0")
+
+	c.SetActionLimits(map[string]int64{"ask": 4096, "generate": 32768})
+	assert.Equal(t, int64(4096), c.LimitFor("ask"))
+	assert.Equal(t, int64(32768), c.LimitFor("generate"))
+	assert.Equal(t, int64(0), c.LimitFor("summarize"))
 }

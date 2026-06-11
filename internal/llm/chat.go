@@ -34,3 +34,9 @@ func doOpenAICompatChat(ctx context.Context, client openai.Client, model string,
 	}
 	return resp.Choices[0].Message.Content, usage, nil
 }
+
+// doOpenAICompatDo is a shared single-turn helper for all OpenAI-compatible providers.
+func doOpenAICompatDo(ctx context.Context, client openai.Client, model string, maxTokens int64, systemPrompt, userPrompt, providerName string) (string, TokenUsage, error) {
+	return doOpenAICompatChat(ctx, client, model, maxTokens, systemPrompt,
+		[]ChatMessage{{Role: "user", Content: userPrompt}}, providerName)
+}

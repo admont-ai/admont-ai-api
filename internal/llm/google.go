@@ -78,11 +78,11 @@ func NewGoogleProvider(apiKey string, maxTokens int64) *GoogleProvider {
 func (p *GoogleProvider) Name() string        { return "google" }
 func (p *GoogleProvider) DefaultModel() Model { return GoogleDefaultModel }
 
-func (p *GoogleProvider) DoChat(ctx context.Context, model, systemPrompt string, messages []ChatMessage) (string, TokenUsage, error) {
+func (p *GoogleProvider) DoChat(ctx context.Context, model, systemPrompt string, messages []ChatMessage, reqMaxTokens int64) (string, TokenUsage, error) {
 	if model == "" {
 		model = GoogleDefaultModel.ID
 	}
-	maxTokens := int32(p.maxTokens)
+	maxTokens := int32(effectiveTokens(reqMaxTokens, p.maxTokens))
 	contents := make([]*genai.Content, 0, len(messages))
 	for _, m := range messages {
 		role := "user"
@@ -112,11 +112,11 @@ func (p *GoogleProvider) DoChat(ctx context.Context, model, systemPrompt string,
 	return resp.Text(), usage, nil
 }
 
-func (p *GoogleProvider) Do(ctx context.Context, model, systemPrompt, userPrompt string) (string, TokenUsage, error) {
+func (p *GoogleProvider) Do(ctx context.Context, model, systemPrompt, userPrompt string, reqMaxTokens int64) (string, TokenUsage, error) {
 	if model == "" {
 		model = GoogleDefaultModel.ID
 	}
-	maxTokens := int32(p.maxTokens)
+	maxTokens := int32(effectiveTokens(reqMaxTokens, p.maxTokens))
 	resp, err := p.client.Models.GenerateContent(ctx, model, genai.Text(userPrompt), &genai.GenerateContentConfig{
 		SystemInstruction: genai.NewContentFromText(systemPrompt, genai.RoleUser),
 		MaxOutputTokens:   maxTokens,

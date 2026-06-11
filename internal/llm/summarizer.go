@@ -67,7 +67,7 @@ func (s *Summarizer) MaybeSummarize(ctx context.Context, conversationID, userEma
 		return
 	}
 
-	summary, _, err := s.client.Do(ctx, model, systemPrompt, sb.String())
+	summary, _, err := s.client.Do(ctx, model, systemPrompt, sb.String(), s.client.LimitFor("summarize"))
 	if err != nil {
 		log.WithError(err).Warn("summarizer: LLM call failed")
 		return
