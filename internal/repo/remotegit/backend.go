@@ -84,8 +84,8 @@ func (b *Backend) ListFolders(subfolder string) ([]string, error) {
 	return b.helper.ListFolders(subfolder)
 }
 
-func (b *Backend) ListAllMdFiles(subfolder string) ([]string, error) {
-	return b.helper.ListAllMdFiles(subfolder)
+func (b *Backend) ListIndexableFiles(subfolder string) ([]string, error) {
+	return b.helper.ListFilesWithExtensions(subfolder, repo.IndexableExtensions)
 }
 
 func (b *Backend) ReadOrder(dirPath string) ([]string, error) {

@@ -1111,6 +1111,9 @@ func (h *RepoRequesthandler) UploadFile() gin.HandlerFunc {
 
 		docPath := filepath.Join(folderPath, filename)
 		backend.SaveChangesAsync("upload "+docPath, userName, userEmail)
+		if h.shouldIndex(repoName) {
+			h.indexer.IndexFile(repoName, docPath)
+		}
 
 		scheme := "http"
 		if c.Request.TLS != nil || c.GetHeader("X-Forwarded-Proto") == "https" {

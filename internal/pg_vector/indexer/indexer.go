@@ -47,6 +47,23 @@ func (idx *Indexer) Status(repoSlug string) string {
 	return StatusReady
 }
 
+// isIndexable reports whether the file type is included in the search index.
+func isIndexable(filePath string) bool {
+	return repo.IndexableFile(filePath)
+}
+
+// chunkFile selects the chunker for the file type.
+func chunkFile(filePath string, content []byte) ([]chunker.Chunk, error) {
+	switch strings.ToLower(filepath.Ext(filePath)) {
+	case ".xlsx":
+		return chunker.ChunkExcel(content)
+	case ".csv":
+		return chunker.ChunkCSV(content)
+	default:
+		return chunker.ChunkMarkdown(content), nil
+	}
+}
+
 // IndexFile reads, chunks, and upserts a single file via the active backend. Runs asynchronously.
 func (idx *Indexer) IndexFile(repoSlug, filePath string) {
 	go func() {
@@ -64,8 +81,7 @@ func (idx *Indexer) indexFile(ctx context.Context, repoSlug, filePath string) er
 		return nil
 	}
 
-	// Only index .md files
-	if filepath.Ext(filePath) != ".md" {
+	if !isIndexable(filePath) {
 		return nil
 	}
 
@@ -92,7 +108,10 @@ func (idx *Indexer) indexFile(ctx context.Context, repoSlug, filePath string) er
 		return err
 	}
 
-	chunks := chunker.ChunkMarkdown(content)
+	chunks, err := chunkFile(filePath, content)
+	if err != nil {
+		return err
+	}
 	if len(chunks) == 0 {
 		return b.DeleteFileChunks(ctx, repoSlug, filePath)
 	}
@@ -138,11 +157,11 @@ func (idx *Indexer) DeleteFolderIndex(repoSlug, folderPath string) {
 		if !ok {
 			return
 		}
-		files, err := rb.ListAllMdFiles(folderPath)
+		files, err := rb.ListIndexableFiles(folderPath)
 		if err != nil {
 			log.WithError(err).WithFields(log.Fields{
 				"repo": repoSlug, "folder": folderPath,
-			}).Error("failed to list md files for folder index delete")
+			}).Error("failed to list indexable files for folder index delete")
 			return
 		}
 		ctx := context.Background()
@@ -156,18 +175,18 @@ func (idx *Indexer) DeleteFolderIndex(repoSlug, folderPath string) {
 	}()
 }
 
-// ReindexFolder re-indexes all .md files under a folder prefix. Runs asynchronously.
+// ReindexFolder re-indexes all indexable files under a folder prefix. Runs asynchronously.
 func (idx *Indexer) ReindexFolder(repoSlug, folderPath string) {
 	go func() {
 		rb, ok := idx.backends[repoSlug]
 		if !ok {
 			return
 		}
-		files, err := rb.ListAllMdFiles(folderPath)
+		files, err := rb.ListIndexableFiles(folderPath)
 		if err != nil {
 			log.WithError(err).WithFields(log.Fields{
 				"repo": repoSlug, "folder": folderPath,
-			}).Error("failed to list md files for folder reindex")
+			}).Error("failed to list indexable files for folder reindex")
 			return
 		}
 		ctx := context.Background()
@@ -197,7 +216,7 @@ func (idx *Indexer) DeleteRepoIndex(repoSlug string) {
 	}()
 }
 
-// FullReindex deletes all chunks for a repo and re-indexes every .md file. Runs asynchronously.
+// FullReindex deletes all chunks for a repo and re-indexes every indexable file. Runs asynchronously.
 func (idx *Indexer) FullReindex(repoSlug string) {
 	idx.statusMap.Store(repoSlug, StatusRebuilding)
 	go func() {
@@ -227,7 +246,7 @@ func (idx *Indexer) fullReindex(ctx context.Context, repoSlug string) error {
 		return err
 	}
 
-	files, err := rb.ListAllMdFiles(idx.docPaths[repoSlug])
+	files, err := rb.ListIndexableFiles(idx.docPaths[repoSlug])
 	if err != nil {
 		return err
 	}
@@ -324,7 +343,7 @@ func (idx *Indexer) incrementalReindex(ctx context.Context, repoSlug string) err
 
 	// Process deletions
 	for _, f := range deleted {
-		if strings.HasSuffix(f, ".md") {
+		if isIndexable(f) {
 			if err := b.DeleteFileChunks(ctx, repoSlug, f); err != nil {
 				log.WithError(err).WithFields(log.Fields{
 					"repo": repoSlug, "file": f,
@@ -335,7 +354,7 @@ func (idx *Indexer) incrementalReindex(ctx context.Context, repoSlug string) err
 
 	// Process additions/modifications
 	for _, f := range changed {
-		if strings.HasSuffix(f, ".md") {
+		if isIndexable(f) {
 			if err := idx.indexFile(ctx, repoSlug, f); err != nil {
 				log.WithError(err).WithFields(log.Fields{
 					"repo": repoSlug, "file": f,

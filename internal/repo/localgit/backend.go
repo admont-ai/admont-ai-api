@@ -212,9 +212,9 @@ func (b *Backend) ListFolders(subfolder string) ([]string, error) {
 	return folders, nil
 }
 
-func (b *Backend) ListAllMdFiles(subfolder string) ([]string, error) {
+func (b *Backend) ListIndexableFiles(subfolder string) ([]string, error) {
 	folderPath := filepath.Join(b.repoPath, subfolder)
-	var mdFiles []string
+	var files []string
 	err := filepath.Walk(folderPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -222,13 +222,13 @@ func (b *Backend) ListAllMdFiles(subfolder string) ([]string, error) {
 		if info.IsDir() && info.Name() == ".git" {
 			return filepath.SkipDir
 		}
-		if !info.IsDir() && filepath.Ext(path) == ".md" {
+		if !info.IsDir() && repo.IndexableFile(path) {
 			relPath, _ := filepath.Rel(b.repoPath, path)
-			mdFiles = append(mdFiles, relPath)
+			files = append(files, relPath)
 		}
 		return nil
 	})
-	return mdFiles, err
+	return files, err
 }
 
 func (b *Backend) ReadOrder(dirPath string) ([]string, error) {

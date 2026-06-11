@@ -454,11 +454,11 @@ func (b *Backend) ListFolders(subfolder string) ([]string, error) {
 	return folders, nil
 }
 
-func (b *Backend) ListAllMdFiles(subfolder string) ([]string, error) {
+func (b *Backend) ListIndexableFiles(subfolder string) ([]string, error) {
 	prefix := b.s3Prefix(subfolder)
 	ctx := context.Background()
 
-	var mdFiles []string
+	var files []string
 	paginator := s3.NewListObjectsV2Paginator(b.client, &s3.ListObjectsV2Input{
 		Bucket: aws.String(b.bucket),
 		Prefix: aws.String(prefix),
@@ -467,18 +467,18 @@ func (b *Backend) ListAllMdFiles(subfolder string) ([]string, error) {
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("s3: list md files %q: %w", prefix, err)
+			return nil, fmt.Errorf("s3: list indexable files %q: %w", prefix, err)
 		}
 		for _, obj := range page.Contents {
 			key := *obj.Key
-			if strings.HasSuffix(key, ".md") {
+			if repo.IndexableFile(key) {
 				relPath := strings.TrimPrefix(key, b.prefix)
-				mdFiles = append(mdFiles, relPath)
+				files = append(files, relPath)
 			}
 		}
 	}
 
-	return mdFiles, nil
+	return files, nil
 }
 
 func (b *Backend) ReadOrder(dirPath string) ([]string, error) {

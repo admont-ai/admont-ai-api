@@ -405,20 +405,25 @@ func (h *Helper) DiffChangedFiles(oldHash, newHash string) (changed []string, de
 	return h.client.DiffChangedFiles(oldHash, newHash)
 }
 
-// ListAllMdFiles returns all .md file paths (relative to repo root) under the given subfolder.
-// Pass "" to list all .md files in the entire repository.
-func (h *Helper) ListAllMdFiles(subfolder string) ([]string, error) {
+// ListFilesWithExtensions returns all file paths (relative to repo root)
+// under the given subfolder whose extension matches one of exts.
+// Pass subfolder "" to search the entire repository.
+func (h *Helper) ListFilesWithExtensions(subfolder string, exts []string) ([]string, error) {
 	allFiles, err := h.listAllFiles(subfolder)
 	if err != nil {
 		return nil, err
 	}
-	var mdFiles []string
+	var matched []string
 	for _, f := range allFiles {
-		if filepath.Ext(f) == ".md" {
-			mdFiles = append(mdFiles, f)
+		ext := strings.ToLower(filepath.Ext(f))
+		for _, e := range exts {
+			if ext == e {
+				matched = append(matched, f)
+				break
+			}
 		}
 	}
-	return mdFiles, nil
+	return matched, nil
 }
 
 // Pull fetches and merges changes from the remote repository.
