@@ -131,7 +131,12 @@ func (h *LLMRequesthandler) HandleLLM(c fuego.ContextWithBody[llmRequest]) (llmR
 		if err != nil {
 			return llmResponse{}, llmError("generate", err)
 		}
-		return llmResponse{Action: "generate", Content: stripCodeFence(result), Usage: usage}, nil
+		content := stripCodeFence(result)
+		if strings.TrimSpace(content) == "" {
+			log.WithFields(log.Fields{"action": "generate", "model": body.Model, "usage": usage}).Warn("LLM returned empty content")
+			return llmResponse{}, fuego.HTTPError{Detail: "The model returned no content. It may have spent its whole token budget on reasoning — increase the provider's max tokens or pick a different model."}
+		}
+		return llmResponse{Action: "generate", Content: content, Usage: usage}, nil
 
 	case "summarize":
 		if body.Content == "" {

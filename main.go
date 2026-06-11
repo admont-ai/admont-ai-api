@@ -1375,7 +1375,10 @@ func buildLLMClient(db *store.Store, registry *llm.ModelRegistry) *llm.Client {
 func registerLLMProvider(client *llm.Client, registry *llm.ModelRegistry, cfg llm_provider.LLMConfig) {
 	maxTokens := cfg.MaxTokens
 	if maxTokens == 0 {
-		maxTokens = 4096
+		// Reasoning models (o-series, gpt-5.x) consume the completion budget
+		// with reasoning tokens before emitting content — 4096 routinely
+		// produces empty responses for them.
+		maxTokens = 16384
 	}
 	var provider llm.Provider
 	provType := cfg.ProviderType
