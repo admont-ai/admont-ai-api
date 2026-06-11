@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // Model represents an LLM model.
@@ -69,6 +72,22 @@ func (c *Client) LimitFor(action string) int64 {
 	return c.actionLimits[action]
 }
 
+// logUsage writes the token consumption of a completed LLM call to the log.
+func logUsage(provider, model string, usage TokenUsage, elapsed time.Duration, err error) {
+	fields := log.Fields{
+		"provider":      provider,
+		"model":         model,
+		"input_tokens":  usage.InputTokens,
+		"output_tokens": usage.OutputTokens,
+		"duration":      elapsed.Round(time.Millisecond).String(),
+	}
+	if err != nil {
+		log.WithFields(fields).WithError(err).Warn("LLM call failed")
+		return
+	}
+	log.WithFields(fields).Info("LLM call completed")
+}
+
 // Do routes the request to the appropriate provider based on the model's
 // provider type. maxTokens is the per-action output limit (0 = provider ceiling).
 func (c *Client) Do(ctx context.Context, model, systemPrompt, userPrompt string, maxTokens int64) (string, TokenUsage, error) {
@@ -79,7 +98,10 @@ func (c *Client) Do(ctx context.Context, model, systemPrompt, userPrompt string,
 	if provType == "" {
 		// Fall back to any available provider
 		for _, p := range c.providers {
-			return p.Do(ctx, model, systemPrompt, userPrompt, maxTokens)
+			start := time.Now()
+			result, usage, err := p.Do(ctx, model, systemPrompt, userPrompt, maxTokens)
+			logUsage(p.Name(), model, usage, time.Since(start), err)
+			return result, usage, err
 		}
 		return "", TokenUsage{}, fmt.Errorf("no LLM providers configured")
 	}
@@ -88,7 +110,10 @@ func (c *Client) Do(ctx context.Context, model, systemPrompt, userPrompt string,
 	if !ok {
 		return "", TokenUsage{}, fmt.Errorf("provider %q not configured", provType)
 	}
-	return p.Do(ctx, model, systemPrompt, userPrompt, maxTokens)
+	start := time.Now()
+	result, usage, err := p.Do(ctx, model, systemPrompt, userPrompt, maxTokens)
+	logUsage(provType, model, usage, time.Since(start), err)
+	return result, usage, err
 }
 
 // DoChat routes a multi-turn request to the appropriate provider.
@@ -100,7 +125,10 @@ func (c *Client) DoChat(ctx context.Context, model, systemPrompt string, message
 	provType := c.registry.ProviderForModel(model)
 	if provType == "" {
 		for _, p := range c.providers {
-			return p.DoChat(ctx, model, systemPrompt, messages, maxTokens)
+			start := time.Now()
+			result, usage, err := p.DoChat(ctx, model, systemPrompt, messages, maxTokens)
+			logUsage(p.Name(), model, usage, time.Since(start), err)
+			return result, usage, err
 		}
 		return "", TokenUsage{}, fmt.Errorf("no LLM providers configured")
 	}
@@ -109,7 +137,10 @@ func (c *Client) DoChat(ctx context.Context, model, systemPrompt string, message
 	if !ok {
 		return "", TokenUsage{}, fmt.Errorf("provider %q not configured", provType)
 	}
-	return p.DoChat(ctx, model, systemPrompt, messages, maxTokens)
+	start := time.Now()
+	result, usage, err := p.DoChat(ctx, model, systemPrompt, messages, maxTokens)
+	logUsage(provType, model, usage, time.Since(start), err)
+	return result, usage, err
 }
 
 // AllModels returns the models available from all known providers.
