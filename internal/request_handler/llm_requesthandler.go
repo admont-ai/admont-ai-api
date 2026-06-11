@@ -20,6 +20,28 @@ type llmRequest struct {
 	Prompt       string `json:"prompt,omitempty"`
 	Content      string `json:"content,omitempty"`
 	Instructions string `json:"instructions,omitempty"`
+	// FileType selects the output format for the "generate" action:
+	// markdown (default), latex, mermaid, drawio, or text.
+	FileType string `json:"file_type,omitempty"`
+}
+
+// generateSystemPrompts maps a file type to the system prompt used by the
+// "generate" action. An unknown or empty file type falls back to markdown.
+var generateSystemPrompts = map[string]string{
+	"markdown": "You are a markdown content writer. Generate well-structured markdown content based on the user's request. " +
+		"Output only the markdown content without wrapping it in a code block.",
+	"latex": "You are a LaTeX document author. Generate a complete, compilable LaTeX document based on the user's request, " +
+		"starting with \\documentclass and ending with \\end{document}. Use standard packages only where needed. " +
+		"Output only the raw LaTeX source — no code fences, no explanations.",
+	"mermaid": "You are a Mermaid diagram generator. Generate a single valid Mermaid diagram based on the user's request. " +
+		"The output must start directly with the diagram type declaration (e.g. flowchart TD, sequenceDiagram, classDiagram, erDiagram, stateDiagram-v2, gantt). " +
+		"Output only the raw Mermaid syntax — no code fences, no explanations, no markdown.",
+	"drawio": "You are a draw.io (diagrams.net) diagram generator. Generate a complete, valid, uncompressed draw.io XML document based on the user's request. " +
+		"The output must be a single <mxfile> element containing a <diagram> element with an <mxGraphModel> whose <root> starts with the two required cells " +
+		"<mxCell id=\"0\"/> and <mxCell id=\"1\" parent=\"0\"/>, followed by the diagram's vertex and edge mxCell elements with sensible mxGeometry coordinates and sizes so the diagram is readable without overlaps. " +
+		"Output only the raw XML — no XML declaration is required, no code fences, no explanations.",
+	"text": "You are a plain-text writer. Generate well-structured plain text based on the user's request. " +
+		"Do not use any markdown or other markup syntax. Output only the plain text — no code fences, no explanations.",
 }
 
 type llmResponse struct {
@@ -101,12 +123,15 @@ func (h *LLMRequesthandler) HandleLLM(c fuego.ContextWithBody[llmRequest]) (llmR
 		if body.Prompt == "" {
 			return llmResponse{}, fuego.BadRequestError{Detail: "prompt is required for generate"}
 		}
-		system := "You are a markdown content writer. Generate well-structured markdown content based on the user's request. Output only the markdown content without wrapping it in a code block."
+		system, ok := generateSystemPrompts[body.FileType]
+		if !ok {
+			system = generateSystemPrompts["markdown"]
+		}
 		result, usage, err := client.Do(ctx, body.Model, system, body.Prompt)
 		if err != nil {
 			return llmResponse{}, llmError("generate", err)
 		}
-		return llmResponse{Action: "generate", Content: result, Usage: usage}, nil
+		return llmResponse{Action: "generate", Content: stripCodeFence(result), Usage: usage}, nil
 
 	case "summarize":
 		if body.Content == "" {
@@ -186,6 +211,28 @@ func (h *LLMRequesthandler) doEdit(ctx context.Context, model, content, task, in
 
 	edited, notes := parseEditResponse(result)
 	return llmResponse{Action: "edit", Content: edited, Original: content, Notes: notes, Usage: usage}, nil
+}
+
+// stripCodeFence unwraps a response that consists of a single markdown code
+// fence (with optional language tag), which models often emit for XML or
+// Mermaid output despite instructions. Content with internal fences (e.g.
+// generated markdown containing code examples) is returned unchanged.
+func stripCodeFence(s string) string {
+	trimmed := strings.TrimSpace(s)
+	if !strings.HasPrefix(trimmed, "```") || !strings.HasSuffix(trimmed, "```") {
+		return s
+	}
+	firstNL := strings.Index(trimmed, "\n")
+	if firstNL == -1 {
+		return s
+	}
+	inner := trimmed[firstNL+1 : len(trimmed)-3]
+	// If the inner content contains another fence, the outer markers are
+	// probably not a simple wrapper — leave the response untouched.
+	if strings.Contains(inner, "```") {
+		return s
+	}
+	return strings.TrimSpace(inner)
 }
 
 func llmError(action string, err error) fuego.HTTPError {
