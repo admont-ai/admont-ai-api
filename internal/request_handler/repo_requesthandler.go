@@ -230,22 +230,20 @@ func (h *RepoRequesthandler) isReadOnly(repoSlug string) bool {
 
 // effectivePermissionLevel returns the effective permission level string for a user on a path.
 func (h *RepoRequesthandler) effectivePermissionLevel(repoSlug, userEmail, path string) string {
-	// System admins always get at least read
+	// System admins bypass permission checks (see checkPermission), so report
+	// Manager regardless of the permissions file to keep the UI consistent
+	// with what is actually enforced.
 	isAdmin := userEmail != "" && h.isSystemAdmin != nil && h.isSystemAdmin(userEmail)
 
 	readOnly := h.isReadOnly(repoSlug)
 
 	resolver := h.permResolvers[repoSlug]
-	if resolver == nil {
-		if isAdmin {
-			return permissions.Manager.String()
-		}
-		return permissions.None.String()
+	level := permissions.None
+	if resolver != nil {
+		level = resolver.EffectiveLevel(userEmail, path)
 	}
-
-	level := resolver.EffectiveLevel(userEmail, path)
-	if isAdmin && level < permissions.Viewer {
-		level = permissions.Viewer
+	if isAdmin {
+		level = permissions.Manager
 	}
 	if readOnly && level > permissions.Viewer {
 		level = permissions.Viewer
@@ -1833,13 +1831,20 @@ func (h *RepoRequesthandler) GetPermissions(c fuego.ContextNoBody) (permissionRe
 	gc := ginCtx(c)
 
 	_, userEmail := getIdentity(gc)
+	isAdmin := userEmail != "" && h.isSystemAdmin != nil && h.isSystemAdmin(userEmail)
 
 	resolver := h.permResolvers[repoName]
 	if resolver == nil {
+		if isAdmin {
+			return permissionResponse{Default: "none", EffectiveLevel: permissions.Manager.String(), Source: "admin"}, nil
+		}
 		return permissionResponse{}, nil
 	}
 
 	level, source := resolver.EffectiveSource(userEmail, filePath)
+	if isAdmin && level < permissions.Manager {
+		level, source = permissions.Manager, "admin"
+	}
 
 	resp := permissionResponse{
 		Default:        "none",
