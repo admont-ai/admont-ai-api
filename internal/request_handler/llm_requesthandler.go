@@ -179,13 +179,24 @@ func (h *LLMRequesthandler) HandleLLM(c fuego.ContextWithBody[llmRequest]) (llmR
 			body.Instructions)
 
 	case "polish":
-		// Generic edit with custom instructions (backward compatible)
+		// Generic edit with custom instructions (backward compatible).
+		// file_type selects diagram-aware editing for mermaid/drawio sources.
 		if body.Content == "" {
 			return llmResponse{}, fuego.BadRequestError{Detail: "content is required for polish"}
 		}
-		return h.doEdit(ctx, body.Model, body.Content,
-			"Improve the following markdown content. Fix grammar, improve clarity, and enhance formatting while preserving the original meaning.",
-			body.Instructions)
+		task := "Improve the following markdown content. Fix grammar, improve clarity, and enhance formatting while preserving the original meaning."
+		switch body.FileType {
+		case "mermaid":
+			task = "Modify the following Mermaid diagram source according to the user's instructions. " +
+				"Preserve the parts of the diagram that are unrelated to the instructions. " +
+				"The result must be valid Mermaid syntax starting with the diagram type declaration — no code fences, no prose."
+		case "drawio":
+			task = "Modify the following draw.io (diagrams.net) XML according to the user's instructions. " +
+				"Preserve the parts of the diagram that are unrelated to the instructions. " +
+				"The result must remain a complete, valid, uncompressed draw.io XML document (<mxfile> with <diagram> and <mxGraphModel>, " +
+				"keeping the two required root cells) with sensible mxGeometry coordinates so the diagram stays readable — no code fences, no prose."
+		}
+		return h.doEdit(ctx, body.Model, body.Content, task, body.Instructions)
 
 	default:
 		return llmResponse{}, fuego.BadRequestError{Detail: fmt.Sprintf("unknown action: %q", body.Action)}
@@ -196,7 +207,7 @@ func (h *LLMRequesthandler) HandleLLM(c fuego.ContextWithBody[llmRequest]) (llmR
 func (h *LLMRequesthandler) doEdit(ctx context.Context, model, content, task, instructions string) (llmResponse, error) {
 	system := task + "\n\n" +
 		"Respond with a JSON object containing exactly two fields:\n" +
-		"- \"content\": the edited markdown text\n" +
+		"- \"content\": the edited content\n" +
 		"- \"notes\": a brief description of what was changed\n\n" +
 		"Output the raw JSON only. Do not wrap it in markdown code fences."
 
@@ -215,7 +226,7 @@ func (h *LLMRequesthandler) doEdit(ctx context.Context, model, content, task, in
 	}
 
 	edited, notes := parseEditResponse(result)
-	return llmResponse{Action: "edit", Content: edited, Original: content, Notes: notes, Usage: usage}, nil
+	return llmResponse{Action: "edit", Content: stripCodeFence(edited), Original: content, Notes: notes, Usage: usage}, nil
 }
 
 // stripCodeFence unwraps a response that consists of a single markdown code
