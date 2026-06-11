@@ -237,7 +237,35 @@ func stripCodeFence(s string) string {
 
 func llmError(action string, err error) fuego.HTTPError {
 	log.WithError(err).WithField("action", action).Warn("LLM request failed")
-	return fuego.HTTPError{Detail: "LLM request failed"}
+	return fuego.HTTPError{Detail: "LLM request failed: " + providerErrorMessage(err)}
+}
+
+// providerErrorMessage extracts a human-readable message from a provider
+// error. Provider SDK errors embed the full HTTP response; if it contains a
+// JSON body with an error message (e.g. Anthropic/OpenAI format), return that
+// instead of the raw dump.
+func providerErrorMessage(err error) string {
+	s := err.Error()
+	if i := strings.Index(s, "{"); i != -1 {
+		var body struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+			Message string `json:"message"`
+		}
+		if json.Unmarshal([]byte(s[i:]), &body) == nil {
+			if body.Error.Message != "" {
+				return body.Error.Message
+			}
+			if body.Message != "" {
+				return body.Message
+			}
+		}
+	}
+	if len(s) > 300 {
+		s = s[:300] + "…"
+	}
+	return s
 }
 
 // parseEditResponse extracts the content and notes from a JSON response.

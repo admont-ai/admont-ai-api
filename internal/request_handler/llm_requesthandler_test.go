@@ -1,6 +1,7 @@
 package requesthandler
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -49,6 +50,24 @@ func TestStripCodeFence(t *testing.T) {
 		})
 	}
 }
+
+func TestProviderErrorMessage(t *testing.T) {
+	anthropicErr := `anthropic API call: POST "https://api.anthropic.com/v1/messages": 400 Bad Request (Request-ID: req_011) {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."},"request_id":"req_011"}`
+	assert.Equal(t,
+		"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.",
+		providerErrorMessage(errFromString(anthropicErr)))
+
+	assert.Equal(t, "connection refused", providerErrorMessage(errFromString("connection refused")))
+
+	long := strings.Repeat("x", 400)
+	assert.Equal(t, long[:300]+"…", providerErrorMessage(errFromString(long)))
+}
+
+type stringError string
+
+func (e stringError) Error() string { return string(e) }
+
+func errFromString(s string) error { return stringError(s) }
 
 func TestGenerateSystemPrompts(t *testing.T) {
 	// Every file type the UI offers must have a prompt, and the fallback must exist.
