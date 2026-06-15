@@ -24,8 +24,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/* && \
     git lfs install
 
-# Install ONNX Runtime shared library
-ARG ONNX_VERSION=1.21.1
+# Install ONNX Runtime shared library.
+# Note: use a version that publishes the CPU linux-x64 tarball
+# (onnxruntime-linux-x64-<ver>.tgz). v1.21.1 only shipped GPU assets.
+ARG ONNX_VERSION=1.21.0
 RUN curl -fsSL https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_VERSION}/onnxruntime-linux-x64-${ONNX_VERSION}.tgz \
     | tar xz -C /tmp && \
     cp /tmp/onnxruntime-linux-x64-${ONNX_VERSION}/lib/libonnxruntime.so.${ONNX_VERSION} /usr/lib/ && \
