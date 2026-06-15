@@ -50,18 +50,5 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # Sync README.md to the Docker Hub repository "Overview" tab (default branch only).
-      # NOTE: Docker Hub's description API needs a password-derived JWT, which
-      # scoped PATs don't grant and 2FA blocks — so this commonly returns
-      # "Forbidden" on 2FA-protected accounts. Kept non-blocking so it can never
-      # fail the image publish; remove it if you prefer to edit the Overview by hand.
-      - name: Update Docker Hub description
-        if: github.ref == 'refs/heads/main'
-        continue-on-error: true
-        uses: peter-evans/dockerhub-description@v4
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-          repository: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
-          short-description: "Backend for Markdown Wiki"
-          readme-filepath: ./README.md
+      # The Docker Hub "Overview" tab is maintained manually: its description API
+      # needs password auth, which 2FA blocks (scoped PATs get "Forbidden").
