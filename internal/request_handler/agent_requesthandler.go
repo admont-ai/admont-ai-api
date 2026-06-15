@@ -316,7 +316,7 @@ func (h *AgentRequesthandler) execTool(ctx context.Context, repoSlug, identity, 
 		return h.toolReadFile(repoSlug, identity, d.Args.Path), nil
 
 	case "search":
-		return h.toolSearch(ctx, repoSlug, d.Args.Query), nil
+		return h.toolSearch(ctx, repoSlug, identity, d.Args.Query), nil
 
 	case "create_file":
 		result := h.toolWriteFile(repoSlug, identity, userName, d.Args.Path, d.Args.Content, true)
@@ -434,7 +434,7 @@ func (h *AgentRequesthandler) toolReadFile(repoSlug, identity, p string) string 
 	return string(content)
 }
 
-func (h *AgentRequesthandler) toolSearch(ctx context.Context, repoSlug, query string) string {
+func (h *AgentRequesthandler) toolSearch(ctx context.Context, repoSlug, identity, query string) string {
 	if strings.TrimSpace(query) == "" {
 		return "error: query is required"
 	}
@@ -445,10 +445,13 @@ func (h *AgentRequesthandler) toolSearch(ctx context.Context, repoSlug, query st
 	if b == nil {
 		return "error: search is not available"
 	}
-	results, err := b.HybridSearch(ctx, []string{repoSlug}, query, "", agentSearchTopK, 0)
+	// Over-fetch, then enforce per-document access so the assistant never sees
+	// chunks from files the user cannot read.
+	results, err := b.HybridSearch(ctx, []string{repoSlug}, query, "", overfetchK(agentSearchTopK), 0)
 	if err != nil {
 		return "error: search failed: " + err.Error()
 	}
+	results = filterAccessibleResults(results, h.permResolvers, h.isSystemAdmin, identity, agentSearchTopK)
 	if len(results) == 0 {
 		return "(no results)"
 	}

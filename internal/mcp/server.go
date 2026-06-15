@@ -684,14 +684,43 @@ func (s *Server) canAccessRepo(repoSlug, identity string) bool {
 	if identity == "" {
 		return false
 	}
-	if identity != "" && s.isSystemAdmin != nil && s.isSystemAdmin(identity) {
+	if s.isSystemAdmin != nil && s.isSystemAdmin(identity) {
 		return true
 	}
 	resolver := s.permResolvers[repoSlug]
 	if resolver == nil {
-		return true
+		// No permissions file on a private repo: not accessible to non-admins
+		// (checkPermission already denies reads here too).
+		return false
 	}
-	return resolver.Check(identity, "/", permissions.Viewer)
+	// Accessible if the user has Viewer on the root OR any path entry (matches
+	// repo listing). Per-file checks still gate individual files.
+	return resolver.HasAnyAccess(identity, permissions.Viewer)
+}
+
+// filterSearchResults keeps only the chunks the user is permitted to view,
+// capped at topK. It mirrors the per-file checks used by the read tools: admins
+// bypass; dot-paths are dropped; a nil resolver means no file-level permissions
+// (the repo-level gate already authorized access); otherwise the user must have
+// at least Viewer on the chunk's path.
+func (s *Server) filterSearchResults(results []backend.SearchResult, identity string, topK int) []backend.SearchResult {
+	admin := identity != "" && s.isSystemAdmin != nil && s.isSystemAdmin(identity)
+	filtered := make([]backend.SearchResult, 0, len(results))
+	for _, r := range results {
+		if !admin {
+			if isDotPath(r.FilePath) {
+				continue
+			}
+			if resolver := s.permResolvers[r.RepoSlug]; resolver != nil && !resolver.Check(identity, r.FilePath, permissions.Viewer) {
+				continue
+			}
+		}
+		filtered = append(filtered, r)
+		if topK > 0 && len(filtered) >= topK {
+			break
+		}
+	}
+	return filtered
 }
 
 func (s *Server) shouldIndex(repoSlug string) bool {

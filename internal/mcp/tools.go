@@ -9,6 +9,7 @@ import (
 
 	"github.com/christianfischer/md-wiki-server/internal/draft"
 	"github.com/christianfischer/md-wiki-server/internal/permissions"
+	"github.com/christianfischer/md-wiki-server/internal/pg_vector/backend"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	log "github.com/sirupsen/logrus"
@@ -957,19 +958,26 @@ func (s *Server) search(ctx context.Context, req mcplib.CallToolRequest) (*mcpli
 	}
 
 	b := s.searchBackend.Get()
-	var results any
+	// Over-fetch so per-file permission filtering can still return topK results.
+	fetchK := topK * 4
+	if fetchK > 400 {
+		fetchK = 400
+	}
+	var results []backend.SearchResult
 	var err error
 	switch mode {
 	case "fulltext":
-		results, err = b.FulltextSearch(ctx, allowedRepos, query, "", topK, threshold)
+		results, err = b.FulltextSearch(ctx, allowedRepos, query, "", fetchK, threshold)
 	case "semantic":
-		results, err = b.SemanticSearch(ctx, allowedRepos, query, "", topK, threshold)
+		results, err = b.SemanticSearch(ctx, allowedRepos, query, "", fetchK, threshold)
 	case "hybrid":
-		results, err = b.HybridSearch(ctx, allowedRepos, query, "", topK, threshold)
+		results, err = b.HybridSearch(ctx, allowedRepos, query, "", fetchK, threshold)
 	}
 	if err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
 	}
+	// Enforce per-document access: drop chunks from files the user cannot read.
+	results = s.filterSearchResults(results, identity, topK)
 	return jsonResult(map[string]any{"results": results}), nil
 }
 

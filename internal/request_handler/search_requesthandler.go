@@ -44,10 +44,17 @@ type SearchRequesthandler struct {
 	backends      map[string]repo.RepoBackend
 	repoConfigs   map[string]*git_repo.GitRepo
 	permResolvers map[string]*permissions.Resolver
+	isSystemAdmin func(string) bool
 }
 
 func NewSearchRequesthandler(b *backend.Holder, rs backend.RepoStateStore, backends map[string]repo.RepoBackend, repoConfigs map[string]*git_repo.GitRepo, permResolvers map[string]*permissions.Resolver) *SearchRequesthandler {
 	return &SearchRequesthandler{backend: b, repoState: rs, backends: backends, repoConfigs: repoConfigs, permResolvers: permResolvers}
+}
+
+// SetSystemAdminCheck wires the system-admin predicate used to bypass per-file
+// permission filtering (mirrors the repo and agent handlers).
+func (h *SearchRequesthandler) SetSystemAdminCheck(fn func(string) bool) {
+	h.isSystemAdmin = fn
 }
 
 func (h *SearchRequesthandler) Search(c fuego.ContextWithBody[searchRequest]) (searchResponse, error) {
@@ -129,13 +136,16 @@ func (h *SearchRequesthandler) Search(c fuego.ContextWithBody[searchRequest]) (s
 
 	var results []backend.SearchResult
 
+	// Over-fetch so per-file permission filtering can still return topK results.
+	fetchK := overfetchK(topK)
+
 	switch mode {
 	case "fulltext":
-		results, err = b.FulltextSearch(gc.Request.Context(), allowedRepos, body.Query, pathPrefix, topK, threshold)
+		results, err = b.FulltextSearch(gc.Request.Context(), allowedRepos, body.Query, pathPrefix, fetchK, threshold)
 	case "semantic":
-		results, err = b.SemanticSearch(gc.Request.Context(), allowedRepos, body.Query, pathPrefix, topK, threshold)
+		results, err = b.SemanticSearch(gc.Request.Context(), allowedRepos, body.Query, pathPrefix, fetchK, threshold)
 	case "hybrid":
-		results, err = b.HybridSearch(gc.Request.Context(), allowedRepos, body.Query, pathPrefix, topK, threshold)
+		results, err = b.HybridSearch(gc.Request.Context(), allowedRepos, body.Query, pathPrefix, fetchK, threshold)
 	}
 
 	if err != nil {
@@ -145,6 +155,9 @@ func (h *SearchRequesthandler) Search(c fuego.ContextWithBody[searchRequest]) (s
 			Detail: "search failed",
 		}
 	}
+
+	// Enforce per-document access: drop chunks from files the user cannot read.
+	results = filterAccessibleResults(results, h.permResolvers, h.isSystemAdmin, userEmail, topK)
 
 	if results == nil {
 		results = []backend.SearchResult{}
@@ -210,9 +223,16 @@ func (h *SearchRequesthandler) canAccessRepo(repoSlug, userEmail string) bool {
 	if userEmail == "" {
 		return false
 	}
-	resolver := h.permResolvers[repoSlug]
-	if resolver == nil {
+	if h.isSystemAdmin != nil && h.isSystemAdmin(userEmail) {
 		return true
 	}
-	return resolver.Check(userEmail, "/", permissions.Viewer)
+	resolver := h.permResolvers[repoSlug]
+	if resolver == nil {
+		// No permissions file on a private repo: hidden from the file/list API
+		// for non-admins, so it must not be searchable either.
+		return false
+	}
+	// Accessible if the user has Viewer on the root OR any path entry, matching
+	// repo listing (GetRepos). Per-file filtering then removes restricted chunks.
+	return resolver.HasAnyAccess(userEmail, permissions.Viewer)
 }

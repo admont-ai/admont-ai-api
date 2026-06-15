@@ -557,6 +557,8 @@ func main() {
 	// Wire up system admin check for file permissions
 	repoHandler.SetSystemAdminCheck(adminHandler.CanManageRepos)
 	agentHandler.SetSystemAdminCheck(adminHandler.CanManageRepos)
+	searchHandler.SetSystemAdminCheck(adminHandler.CanManageRepos)
+	ragHandler.SetSystemAdminCheck(adminHandler.CanManageRepos)
 
 	// Set default import path for Confluence imports
 	repoHandler.SetImportPath(cfg.ImportPath)

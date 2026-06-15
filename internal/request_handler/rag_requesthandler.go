@@ -52,10 +52,17 @@ type RAGRequesthandler struct {
 	permResolvers map[string]*permissions.Resolver
 	convStore     *ai_conversation.Store
 	summarizer    *llm.Summarizer
+	isSystemAdmin func(string) bool
 }
 
 func NewRAGRequesthandler(llmClient *llm.Client, b *backend.Holder, backends map[string]repo.RepoBackend, repoConfigs map[string]*git_repo.GitRepo, permResolvers map[string]*permissions.Resolver) *RAGRequesthandler {
 	return &RAGRequesthandler{llmClient: llmClient, backend: b, backends: backends, repoConfigs: repoConfigs, permResolvers: permResolvers}
+}
+
+// SetSystemAdminCheck wires the system-admin predicate used to bypass per-file
+// permission filtering (mirrors the repo and agent handlers).
+func (h *RAGRequesthandler) SetSystemAdminCheck(fn func(string) bool) {
+	h.isSystemAdmin = fn
 }
 
 func (h *RAGRequesthandler) SetConversationStore(store *ai_conversation.Store, summarizer *llm.Summarizer) {
@@ -147,10 +154,13 @@ func (h *RAGRequesthandler) RAG(c fuego.ContextWithBody[ragRequest]) (ragRespons
 
 		b := h.backend.Get()
 		if b != nil {
-			results, err := b.HybridSearch(gc.Request.Context(), allowedRepos, body.Query, pathPrefix, topK, threshold)
+			// Over-fetch, then enforce per-document access before the chunks reach
+			// the LLM context or the cited sources.
+			results, err := b.HybridSearch(gc.Request.Context(), allowedRepos, body.Query, pathPrefix, overfetchK(topK), threshold)
 			if err != nil {
 				log.WithError(err).Warn("RAG search failed")
 			} else {
+				results = filterAccessibleResults(results, h.permResolvers, h.isSystemAdmin, userEmail, topK)
 				sources = make([]ragSource, len(results))
 				for i, r := range results {
 					sources[i] = ragSource{
@@ -322,11 +332,18 @@ func (h *RAGRequesthandler) canAccessRepo(repoSlug, userEmail string) bool {
 	if userEmail == "" {
 		return false
 	}
-	resolver := h.permResolvers[repoSlug]
-	if resolver == nil {
+	if h.isSystemAdmin != nil && h.isSystemAdmin(userEmail) {
 		return true
 	}
-	return resolver.Check(userEmail, "/", permissions.Viewer)
+	resolver := h.permResolvers[repoSlug]
+	if resolver == nil {
+		// No permissions file on a private repo: hidden from the file/list API
+		// for non-admins, so it must not be searchable either.
+		return false
+	}
+	// Accessible if the user has Viewer on the root OR any path entry, matching
+	// repo listing (GetRepos). Per-file filtering then removes restricted chunks.
+	return resolver.HasAnyAccess(userEmail, permissions.Viewer)
 }
 
 func (h *RAGRequesthandler) loadRepoSettings(slug string) *searchRepoSettings {
