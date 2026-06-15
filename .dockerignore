@@ -1,0 +1,17 @@
+# Keep the build context small and avoid leaking local artifacts/secrets.
+.git
+.github
+.env
+.env.*
+*.md
+docker-compose
+config.yaml
+config.yaml-old
+
+# Local build output / editor
+*.test
+*.out
+coverage.*
+.idea
+.vscode
+.DS_Store
