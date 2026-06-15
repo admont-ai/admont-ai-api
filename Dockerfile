@@ -10,14 +10,19 @@ COPY . .
 RUN CGO_ENABLED=1 go build -o /bin/admont-ai-api .
 
 # ---- Model stage ----
-FROM python:3.12-slim-bookworm AS model
+# Fetch a prebuilt ONNX export of all-MiniLM-L6-v2 instead of exporting it at
+# build time. The prebuilt graph exposes `last_hidden_state` with inputs
+# input_ids/attention_mask/token_type_ids — exactly what the Go embedder
+# consumes (it does its own mean pooling + L2 normalize) — and avoids pulling
+# torch/optimum/onnxscript into the build.
+FROM alpine:3.20 AS model
 
-# Pin optimum to the last 1.x: optimum 2.x moved the ONNX exporter into a
-# separate `optimum-onnx` package, so `optimum-cli export onnx` is no longer
-# registered by `optimum[exporters]` alone.
-RUN pip install --no-cache-dir "optimum[exporters]==1.24.0" onnx onnxruntime transformers torch --extra-index-url https://download.pytorch.org/whl/cpu
-RUN optimum-cli export onnx --model sentence-transformers/all-MiniLM-L6-v2 /models && \
-    if [ ! -f /models/vocab.txt ]; then cp "$(find /models -name vocab.txt | head -1)" /models/vocab.txt; fi
+ARG MODEL_ONNX_URL=https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx
+ARG VOCAB_URL=https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/vocab.txt
+RUN apk add --no-cache curl ca-certificates && \
+    mkdir -p /models && \
+    curl -fsSL -o /models/model.onnx "${MODEL_ONNX_URL}" && \
+    curl -fsSL -o /models/vocab.txt "${VOCAB_URL}"
 
 # ---- Runtime stage ----
 FROM debian:bookworm-slim
