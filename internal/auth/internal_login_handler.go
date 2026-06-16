@@ -219,6 +219,9 @@ func (h *Handler) ResetPassword(c *gin.Context) {
 		return
 	}
 
+	// Refresh the admin user cache so password_expired no longer shows as set.
+	h.notifyUserChange()
+
 	user, _ := h.authn.store.Users.GetInternalUser(c.Request.Context(), email)
 	h.issueTokens(c, email, displayName(user, email))
 }

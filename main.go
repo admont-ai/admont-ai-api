@@ -697,6 +697,8 @@ func main() {
 			return changePasswordResponse{}, fmt.Errorf("internal error")
 		}
 		_ = db.Users.ClearPasswordExpired(ctx, userEmail)
+		// Refresh the admin user cache so the cleared password_expired flag is reflected.
+		adminHandler.ReloadUsers()
 		// Invalidate all existing access/refresh tokens for this user so a
 		// previously-issued (or stolen) token cannot outlive the password change.
 		if id, ok := gc.Get(middleware.CtxUserIdentity); ok {
