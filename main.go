@@ -688,6 +688,9 @@ func main() {
 		if err := bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(body.CurrentPassword)); err != nil {
 			return changePasswordResponse{}, fuego.ForbiddenError{Detail: "current password is incorrect"}
 		}
+		if bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(body.NewPassword)) == nil {
+			return changePasswordResponse{}, fuego.BadRequestError{Detail: "new password must be different from the current password"}
+		}
 		hash, err := bcrypt.GenerateFromPassword([]byte(body.NewPassword), bcrypt.DefaultCost)
 		if err != nil {
 			return changePasswordResponse{}, fmt.Errorf("internal error")

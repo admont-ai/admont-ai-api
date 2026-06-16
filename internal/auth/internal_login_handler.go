@@ -210,7 +210,7 @@ func (h *Handler) ResetPassword(c *gin.Context) {
 		return
 	}
 	if err := h.authn.ResetExpiredPassword(c.Request.Context(), email, body.NewPassword); err != nil {
-		if errors.Is(err, ErrWeakPassword) {
+		if errors.Is(err, ErrWeakPassword) || errors.Is(err, ErrPasswordReused) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}

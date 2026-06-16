@@ -31,6 +31,7 @@ var (
 	ErrInvalidTOTP        = errors.New("invalid code")
 	ErrPendingToken       = errors.New("invalid or expired session")
 	ErrResetToken         = errors.New("invalid or expired reset session")
+	ErrPasswordReused     = errors.New("new password must be different from the current password")
 )
 
 // PasswordComplexityError reports a password that fails the configured policy.
@@ -332,6 +333,12 @@ func (a *Authenticator) ValidateResetToken(token string) (string, error) {
 func (a *Authenticator) ResetExpiredPassword(ctx context.Context, email, newPassword string) error {
 	if err := a.policy.Validate(newPassword); err != nil {
 		return &PasswordComplexityError{Msg: err.Error()}
+	}
+	// Reject reusing the current (e.g. admin-set temporary) password.
+	if storedHash, err := a.store.Users.GetPasswordHash(ctx, email); err == nil && storedHash != "" {
+		if bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(newPassword)) == nil {
+			return ErrPasswordReused
+		}
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
 	if err != nil {
