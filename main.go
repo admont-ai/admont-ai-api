@@ -265,10 +265,6 @@ func main() {
 		log.WithField("provider", p.Name).Info("auth provider registered")
 	}
 
-	if len(allAuthProviders) == 0 {
-		log.Warn("no auth providers configured — add via POST /admin/auth")
-	}
-
 	jwtService := auth.NewJWTService(jwtSecret, 1*time.Hour)
 	var authenticator *auth.Authenticator
 	if cfg.InternalAuth.Enabled {
