@@ -82,6 +82,21 @@ type Config struct {
 	ImportPath      string             `mapstructure:"import_path"`
 }
 
+// Redacted returns a copy of the config with secret values masked, suitable for
+// logging the effective configuration (defaults + file + env overrides).
+func (c Config) Redacted() Config {
+	mask := func(s string) string {
+		if s == "" {
+			return ""
+		}
+		return "[REDACTED]"
+	}
+	c.EncryptionKey = mask(c.EncryptionKey)
+	c.JWTSecret = mask(c.JWTSecret)
+	c.Database.Password = mask(c.Database.Password)
+	return c
+}
+
 func Load() (*Config, error) {
 	// Load .env file if present (does not override existing env vars).
 	_ = godotenv.Load()

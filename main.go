@@ -129,51 +129,20 @@ func savePermissionsToBackend(backend repo.RepoBackend, r *permissions.Resolver)
 	return backend.AddFile("", permissions.PermissionsFileName, data)
 }
 
-// secretEnvSubstrings are case-insensitive name fragments whose env var values
-// are redacted when logging the environment at startup.
-var secretEnvSubstrings = []string{
-	"SECRET", "PASS", "TOKEN", "KEY", "CREDENTIAL", "PRIVATE", "SALT", "DSN", "APIKEY",
-}
-
-func isSecretEnv(name string) bool {
-	up := strings.ToUpper(name)
-	for _, s := range secretEnvSubstrings {
-		if strings.Contains(up, s) {
-			return true
-		}
-	}
-	return false
-}
-
-// logEnvironment logs every environment variable at startup (sorted by name),
-// redacting the value of any whose name suggests it is sensitive.
-func logEnvironment() {
-	env := os.Environ()
-	sort.Strings(env)
-	for _, e := range env {
-		name, value, ok := strings.Cut(e, "=")
-		if !ok {
-			continue
-		}
-		if isSecretEnv(name) {
-			value = "[REDACTED]"
-		}
-		log.WithFields(log.Fields{"name": name, "value": value}).Info("environment variable")
-	}
-}
-
 func main() {
 	log.SetFormatter(&log.TextFormatter{
 		FullTimestamp:   true,
 		TimestampFormat: "2006-01-02 15:04:05",
 	})
 
-	logEnvironment()
-
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
+
+	// Log the effective configuration (defaults + config file + env overrides),
+	// with secret values redacted.
+	log.WithField("config", fmt.Sprintf("%+v", cfg.Redacted())).Info("loaded configuration")
 
 	if len(cfg.AllowedOrigins) == 0 {
 		log.Fatal("allowed_origins must be set in config")
