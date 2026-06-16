@@ -59,6 +59,27 @@ go test ./...       # test
 make run            # run locally (see the Makefile / docs for prerequisites)
 ```
 
+## Releasing (publishing a Docker image)
+
+Images are published to Docker Hub by the [`docker-publish`](.github/workflows/docker-publish.yml) workflow, which runs **only when a `v*` tag is pushed** (commits to `main` do not publish). The version comes entirely from the tag name, so cutting a release is just tagging:
+
+```bash
+git checkout main && git pull          # release from up-to-date main
+git tag -a v0.1.1 -m "v0.1.1"          # tag must start with "v" and be semver
+git push origin v0.1.1                  # pushing the tag triggers the workflow
+```
+
+The workflow runs the tests first and builds/pushes the image **only if they pass**. A tag `v0.1.1` produces these Docker Hub tags:
+
+| Tag | Source |
+|---|---|
+| `0.1.1` | full version |
+| `0.1` | major.minor (moves to the newest patch) |
+| `sha-<short>` | the tagged commit |
+| `latest` | the newest semver tag |
+
+To remove a mistaken tag before relying on it: `git push origin :refs/tags/v0.1.1 && git tag -d v0.1.1` (the image may already exist on Docker Hub). You can also trigger a build manually from the Actions tab via **workflow_dispatch**.
+
 ## Configuration
 
 Configuration is read from environment variables (a local `.env` is supported) or a `config.yaml`. The essentials:
