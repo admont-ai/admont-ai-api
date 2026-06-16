@@ -39,6 +39,14 @@ type InternalAuthConfig struct {
 	// WebAuthnOrigins is the list of full origins (scheme+host[:port]) allowed to
 	// perform passkey ceremonies. Defaults to allowed_origins.
 	WebAuthnOrigins []string `mapstructure:"webauthn_origins"`
+
+	// Password complexity rules applied wherever an internal-user password is set
+	// (signup, self-service change, admin create/reset).
+	PasswordMinLength     int  `mapstructure:"password_min_length"`
+	PasswordRequireUpper  bool `mapstructure:"password_require_uppercase"`
+	PasswordRequireLower  bool `mapstructure:"password_require_lowercase"`
+	PasswordRequireDigit  bool `mapstructure:"password_require_digit"`
+	PasswordRequireSymbol bool `mapstructure:"password_require_symbol"`
 }
 
 // ExternalAuthConfig governs how social-login (external IdP) users are handled.
@@ -93,6 +101,11 @@ func Load() (*Config, error) {
 	viper.SetDefault("internal_auth.public_url", "http://localhost:4444")
 	viper.SetDefault("internal_auth.max_failed_login", 5)
 	viper.SetDefault("internal_auth.failed_login_interval_mins", 15)
+	viper.SetDefault("internal_auth.password_min_length", 8)
+	viper.SetDefault("internal_auth.password_require_uppercase", false)
+	viper.SetDefault("internal_auth.password_require_lowercase", false)
+	viper.SetDefault("internal_auth.password_require_digit", false)
+	viper.SetDefault("internal_auth.password_require_symbol", false)
 	viper.SetDefault("external_auth.signup_mode", "manual")
 	viper.SetDefault("repo_clone_path", "/tmp/admont-api/repos")
 	viper.SetDefault("local_repo_path", "/tmp/admont-api/local-repos")

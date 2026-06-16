@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/christianfischer/md-wiki-server/config"
 	"github.com/christianfischer/md-wiki-server/internal/store"
 	storeusers "github.com/christianfischer/md-wiki-server/internal/store/users"
 	"github.com/pquerna/otp/totp"
@@ -29,7 +30,16 @@ var (
 	ErrWeakPassword       = errors.New("password too short")
 	ErrInvalidTOTP        = errors.New("invalid code")
 	ErrPendingToken       = errors.New("invalid or expired session")
+	ErrResetToken         = errors.New("invalid or expired reset session")
 )
+
+// PasswordComplexityError reports a password that fails the configured policy.
+// It satisfies errors.Is(err, ErrWeakPassword) so callers can map it to a 400
+// while surfacing the specific, human-readable reason via Error().
+type PasswordComplexityError struct{ Msg string }
+
+func (e *PasswordComplexityError) Error() string { return e.Msg }
+func (e *PasswordComplexityError) Is(target error) bool { return target == ErrWeakPassword }
 
 // loginRateLimiter tracks failed login attempts per IP.
 type loginRateLimiter struct {
@@ -102,6 +112,7 @@ type Authenticator struct {
 	limiter    *loginRateLimiter
 	signingKey []byte
 	signupMu   sync.Mutex // serializes first-user signup
+	policy     config.PasswordPolicy
 }
 
 // NewAuthenticator creates an Authenticator. signingKey signs pending TOTP tokens.
@@ -110,8 +121,16 @@ func NewAuthenticator(st *store.Store, maxFailed, intervalMins int, signingKey [
 		store:      st,
 		limiter:    newLoginRateLimiter(maxFailed, time.Duration(intervalMins)*time.Minute),
 		signingKey: signingKey,
+		policy:     config.DefaultPasswordPolicy(),
 	}
 }
+
+// SetPasswordPolicy configures the complexity rules enforced for signups and
+// forced resets.
+func (a *Authenticator) SetPasswordPolicy(p config.PasswordPolicy) { a.policy = p }
+
+// ValidatePassword reports whether pw satisfies the configured complexity policy.
+func (a *Authenticator) ValidatePassword(pw string) error { return a.policy.Validate(pw) }
 
 // Blocked reports whether the IP has exceeded the failed-attempt limit.
 func (a *Authenticator) Blocked(ip string) bool { return a.limiter.blocked(ip) }
@@ -190,8 +209,8 @@ func (a *Authenticator) VerifyTOTP(ctx context.Context, ip, email, code string) 
 // creating two super admins. The username is used as login identifier and also
 // stored as the email for backward compatibility with identity strings.
 func (a *Authenticator) Signup(ctx context.Context, username, password, firstName, lastName string) error {
-	if len(password) < 8 {
-		return ErrWeakPassword
+	if err := a.policy.Validate(password); err != nil {
+		return &PasswordComplexityError{Msg: err.Error()}
 	}
 	a.signupMu.Lock()
 	defer a.signupMu.Unlock()
@@ -275,4 +294,51 @@ func (a *Authenticator) ValidatePendingToken(token string) (string, error) {
 		return "", ErrPendingToken
 	}
 	return email, nil
+}
+
+const passwordResetTokenTTL = 10 * time.Minute
+
+// CreateResetToken issues an HMAC-signed, time-limited token authorizing a
+// forced password reset for an expired-password account. It is domain-separated
+// from the pending-TOTP token so the two are not interchangeable.
+func (a *Authenticator) CreateResetToken(email string) string {
+	expiry := strconv.FormatInt(time.Now().Add(passwordResetTokenTTL).Unix(), 10)
+	mac := hmac.New(sha256.New, a.signingKey)
+	mac.Write([]byte("reset|" + email + "|" + expiry))
+	return email + "|" + expiry + "|" + hex.EncodeToString(mac.Sum(nil))
+}
+
+// ValidateResetToken verifies a reset token and returns the bound email.
+func (a *Authenticator) ValidateResetToken(token string) (string, error) {
+	parts := strings.SplitN(token, "|", 3)
+	if len(parts) != 3 {
+		return "", ErrResetToken
+	}
+	email, expiryStr, sig := parts[0], parts[1], parts[2]
+	mac := hmac.New(sha256.New, a.signingKey)
+	mac.Write([]byte("reset|" + email + "|" + expiryStr))
+	if !hmac.Equal([]byte(sig), []byte(hex.EncodeToString(mac.Sum(nil)))) {
+		return "", ErrResetToken
+	}
+	expiry, err := strconv.ParseInt(expiryStr, 10, 64)
+	if err != nil || time.Now().Unix() > expiry {
+		return "", ErrResetToken
+	}
+	return email, nil
+}
+
+// ResetExpiredPassword validates the new password against the policy, stores it,
+// and clears the expired flag. Used by the forced-reset flow.
+func (a *Authenticator) ResetExpiredPassword(ctx context.Context, email, newPassword string) error {
+	if err := a.policy.Validate(newPassword); err != nil {
+		return &PasswordComplexityError{Msg: err.Error()}
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hashing password: %w", err)
+	}
+	if err := a.store.Users.SetPasswordHash(ctx, email, string(hash)); err != nil {
+		return fmt.Errorf("storing password hash: %w", err)
+	}
+	return a.store.Users.ClearPasswordExpired(ctx, email)
 }

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/christianfischer/md-wiki-server/config"
 	"github.com/christianfischer/md-wiki-server/internal/auth"
 	"github.com/christianfischer/md-wiki-server/internal/draft"
 	gitpkg "github.com/christianfischer/md-wiki-server/internal/git"
@@ -57,6 +58,7 @@ type AdminRequesthandler struct {
 	modelRegistry        *llm.ModelRegistry
 	llmRebuild           func()
 	invalidateSessions   func(identity string)
+	passwordPolicy       config.PasswordPolicy
 	mu                   sync.RWMutex
 }
 
@@ -64,6 +66,12 @@ type AdminRequesthandler struct {
 // tokens after an admin changes their password.
 func (h *AdminRequesthandler) SetSessionInvalidator(fn func(identity string)) {
 	h.invalidateSessions = fn
+}
+
+// SetPasswordPolicy configures the complexity rules enforced when an admin
+// creates a user or resets a password.
+func (h *AdminRequesthandler) SetPasswordPolicy(p config.PasswordPolicy) {
+	h.passwordPolicy = p
 }
 
 // SetIndexer sets the optional search indexer for triggering index updates on repo add/remove.
@@ -443,6 +451,9 @@ func (h *AdminRequesthandler) AddInternalUser(c fuego.ContextWithBody[addInterna
 	if body.Password == "" {
 		return users.UserEntry{}, fuego.BadRequestError{Detail: "password is required"}
 	}
+	if err := h.passwordPolicy.Validate(body.Password); err != nil {
+		return users.UserEntry{}, fuego.BadRequestError{Detail: err.Error()}
+	}
 
 	// Only super admins may create users with super-admin status or roles.
 	if body.SuperAdmin || len(body.Roles) > 0 {
@@ -473,14 +484,16 @@ func (h *AdminRequesthandler) AddInternalUser(c fuego.ContextWithBody[addInterna
 		status = "suspended"
 	}
 	entry := users.UserEntry{
-		Internal:        true,
-		Username:        body.Username,
-		Email:           body.Username,
-		FirstName:       body.FirstName,
-		LastName:        body.LastName,
-		SuperAdmin:      body.SuperAdmin,
-		Roles:           roles,
-		PasswordExpired: body.PasswordExpired,
+		Internal:   true,
+		Username:   body.Username,
+		Email:      body.Username,
+		FirstName:  body.FirstName,
+		LastName:   body.LastName,
+		SuperAdmin: body.SuperAdmin,
+		Roles:      roles,
+		// New users always start with an expired password: the admin-set password
+		// is temporary and must be reset by the user at first login.
+		PasswordExpired: true,
 		Status:          status,
 		Suspended:       body.Suspended,
 	}
@@ -548,6 +561,14 @@ func (h *AdminRequesthandler) UpdateInternalUser(c fuego.ContextWithBody[updateI
 			}
 			if body.PasswordExpired != nil {
 				h.users[i].PasswordExpired = *body.PasswordExpired
+			}
+			// An admin-set password is temporary: validate it against the policy
+			// and force a reset at the user's next login.
+			if body.Password != nil && *body.Password != "" {
+				if err := h.passwordPolicy.Validate(*body.Password); err != nil {
+					return users.UserEntry{}, fuego.BadRequestError{Detail: err.Error()}
+				}
+				h.users[i].PasswordExpired = true
 			}
 			if body.Suspended != nil {
 				h.users[i].Status = suspendStatus(h.users[i].Status, *body.Suspended)

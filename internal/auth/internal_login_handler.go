@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
@@ -84,7 +85,7 @@ func (h *Handler) InternalLogin(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"totp_required": true, "pending_token": h.authn.CreatePendingToken(email)})
 		return
 	}
-	h.issueTokens(c, email, displayName(user, email))
+	h.issueOrRequireReset(c, user)
 }
 
 // InternalTOTP completes a login by verifying a TOTP or recovery code against
@@ -125,7 +126,7 @@ func (h *Handler) InternalTOTP(c *gin.Context) {
 	}
 
 	user, _ := h.authn.store.Users.GetInternalUser(c.Request.Context(), email)
-	h.issueTokens(c, email, displayName(user, email))
+	h.issueOrRequireReset(c, user)
 }
 
 // InternalSignup creates the first internal user (super admin) and logs them in.
@@ -147,18 +148,79 @@ func (h *Handler) InternalSignup(c *gin.Context) {
 	}
 
 	err := h.authn.Signup(c.Request.Context(), body.Username, body.Password, body.FirstName, body.LastName)
-	switch err {
-	case nil:
+	switch {
+	case err == nil:
 		log.WithField("identity", "internal:"+body.Username).Info("first internal user created")
 		h.issueTokens(c, body.Username, displayName(&users.UserEntry{FirstName: body.FirstName, LastName: body.LastName}, body.Username))
-	case ErrWeakPassword:
-		c.JSON(http.StatusBadRequest, gin.H{"error": "password must be at least 8 characters"})
-	case ErrSignupClosed:
+	case errors.Is(err, ErrWeakPassword):
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	case errors.Is(err, ErrSignupClosed):
 		c.JSON(http.StatusForbidden, gin.H{"error": "signup is no longer available; ask an administrator to add your account"})
 	default:
 		log.WithError(err).Error("internal signup failed")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 	}
+}
+
+// issueOrRequireReset issues tokens for a fully-authenticated user, unless their
+// password is expired — in which case no normal token is issued. Instead a
+// short-lived, single-purpose reset token is returned so the client must set a
+// new password (via ResetPassword) before gaining any access.
+func (h *Handler) issueOrRequireReset(c *gin.Context, user *users.UserEntry) {
+	if user != nil && user.PasswordExpired {
+		c.JSON(http.StatusOK, gin.H{
+			"password_reset_required": true,
+			"reset_token":             h.authn.CreateResetToken(user.Email),
+		})
+		return
+	}
+	email := ""
+	if user != nil {
+		email = user.Email
+	}
+	h.issueTokens(c, email, displayName(user, email))
+}
+
+// ResetPassword completes a forced password reset: it verifies the reset token
+// issued at login, applies the new password (enforcing complexity), clears the
+// expired flag, and only then issues normal tokens.
+func (h *Handler) ResetPassword(c *gin.Context) {
+	if h.authn == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "internal auth disabled"})
+		return
+	}
+	var body struct {
+		ResetToken  string `json:"reset_token"`
+		NewPassword string `json:"new_password"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.ResetToken == "" || body.NewPassword == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "reset_token and new_password are required"})
+		return
+	}
+
+	ip := c.ClientIP()
+	if h.authn.Blocked(ip) {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many attempts; try again later"})
+		return
+	}
+
+	email, err := h.authn.ValidateResetToken(body.ResetToken)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "session expired; please log in again"})
+		return
+	}
+	if err := h.authn.ResetExpiredPassword(c.Request.Context(), email, body.NewPassword); err != nil {
+		if errors.Is(err, ErrWeakPassword) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		log.WithError(err).Error("password reset failed")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+
+	user, _ := h.authn.store.Users.GetInternalUser(c.Request.Context(), email)
+	h.issueTokens(c, email, displayName(user, email))
 }
 
 // InternalSignupStatus reports whether first-user signup is still open, so the

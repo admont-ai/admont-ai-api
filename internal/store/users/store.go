@@ -321,6 +321,17 @@ func (s *Store) ClearPasswordExpired(ctx context.Context, email string) error {
 	return nil
 }
 
+// SetPasswordExpired sets password_expired to true for an internal user, forcing
+// a password reset at next login.
+func (s *Store) SetPasswordExpired(ctx context.Context, email string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE credentials SET password_expired = TRUE WHERE user_id = `+internalUserID, email)
+	if err != nil {
+		return fmt.Errorf("setting password_expired for %q: %w", email, err)
+	}
+	return nil
+}
+
 // --- TOTP (internal users) ---
 
 // SetTOTPSecret stores the encrypted TOTP secret (does not enable TOTP).

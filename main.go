@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"image/png"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -268,6 +269,7 @@ func main() {
 	var authenticator *auth.Authenticator
 	if cfg.InternalAuth.Enabled {
 		authenticator = auth.NewAuthenticator(db, cfg.InternalAuth.MaxFailedLogin, cfg.InternalAuth.FailedLoginIntervalMin, signingKey)
+		authenticator.SetPasswordPolicy(cfg.InternalAuth.PasswordPolicy())
 	}
 	authHandler := auth.NewHandler(httpRegistry, jwtService, cfg.AllowedOrigins, authenticator, db.Users, cfg.ExternalAuth.SignupMode)
 
@@ -545,6 +547,10 @@ func main() {
 		internalGroup.POST("/login", middleware.RateLimit(loginLimiter), authHandler.InternalLogin)
 		internalGroup.POST("/totp", middleware.RateLimit(loginLimiter), authHandler.InternalTOTP)
 		internalGroup.POST("/signup", middleware.RateLimit(loginLimiter), authHandler.InternalSignup)
+		// Forced password reset (expired password) and the public password policy.
+		internalGroup.POST("/reset-password", middleware.RateLimit(loginLimiter), authHandler.ResetPassword)
+		passwordPolicy := cfg.InternalAuth.PasswordPolicy()
+		internalGroup.GET("/password-policy", func(c *gin.Context) { c.JSON(http.StatusOK, passwordPolicy) })
 		// Passkey (discoverable / usernameless) login.
 		internalGroup.POST("/webauthn/login/begin", middleware.RateLimit(loginLimiter), authHandler.WebAuthnLoginBegin)
 		internalGroup.POST("/webauthn/login/finish", middleware.RateLimit(loginLimiter), authHandler.WebAuthnLoginFinish)
@@ -576,6 +582,7 @@ func main() {
 	})
 
 	adminHandler.SetSessionInvalidator(jwtService.InvalidateSessions)
+	adminHandler.SetPasswordPolicy(cfg.InternalAuth.PasswordPolicy())
 	// Refresh the admin user cache when social login creates/updates a user.
 	authHandler.SetUserChangeHook(adminHandler.ReloadUsers)
 
@@ -669,8 +676,8 @@ func main() {
 		if body.CurrentPassword == "" || body.NewPassword == "" {
 			return changePasswordResponse{}, fuego.BadRequestError{Detail: "current_password and new_password are required"}
 		}
-		if len(body.NewPassword) < 8 {
-			return changePasswordResponse{}, fuego.BadRequestError{Detail: "new password must be at least 8 characters"}
+		if err := cfg.InternalAuth.PasswordPolicy().Validate(body.NewPassword); err != nil {
+			return changePasswordResponse{}, fuego.BadRequestError{Detail: err.Error()}
 		}
 		email, _ := gc.Get(middleware.CtxUserEmail)
 		userEmail := email.(string)
