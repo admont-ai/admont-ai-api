@@ -124,6 +124,26 @@ CREATE TABLE credentials (
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- WebAuthn (passkey) credentials; 0..n per internal user. A user-verified
+-- passkey is multi-factor on its own, so a passkey login bypasses TOTP.
+CREATE TABLE webauthn_credentials (
+    id              SERIAL PRIMARY KEY,
+    user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    credential_id   BYTEA NOT NULL UNIQUE,
+    public_key      BYTEA NOT NULL,
+    attestation_type TEXT NOT NULL DEFAULT '',
+    transports      TEXT[] NOT NULL DEFAULT '{}',
+    aaguid          BYTEA,
+    sign_count      BIGINT NOT NULL DEFAULT 0,
+    backup_eligible BOOLEAN NOT NULL DEFAULT FALSE,
+    backup_state    BOOLEAN NOT NULL DEFAULT FALSE,
+    name            TEXT NOT NULL DEFAULT '',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_used_at    TIMESTAMPTZ
+);
+
+CREATE INDEX idx_webauthn_credentials_user_id ON webauthn_credentials (user_id);
+
 CREATE TABLE user_groups (
     id          SERIAL PRIMARY KEY,
     name        TEXT NOT NULL UNIQUE,

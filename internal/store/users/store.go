@@ -128,6 +128,22 @@ func (s *Store) GetUserID(ctx context.Context, provider, email string) (int, err
 	return id, nil
 }
 
+// GetInternalUserByID retrieves an internal user by numeric id, or nil if not
+// found. Used to resolve the WebAuthn user handle during discoverable login.
+func (s *Store) GetInternalUserByID(ctx context.Context, id int) (*UserEntry, error) {
+	row := s.pool.QueryRow(ctx, `SELECT`+userColumns+`
+		FROM users u LEFT JOIN credentials c ON c.user_id = u.id
+		WHERE u.id = $1 AND u.provider = 'internal'`, id)
+	u, err := scanUser(row)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("getting internal user by id %d: %w", id, err)
+	}
+	return u, nil
+}
+
 // GetUserByUsername retrieves an internal user by username, or nil if not found.
 func (s *Store) GetUserByUsername(ctx context.Context, username string) (*UserEntry, error) {
 	row := s.pool.QueryRow(ctx, `SELECT`+userColumns+`

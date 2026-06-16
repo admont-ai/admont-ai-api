@@ -32,6 +32,13 @@ type InternalAuthConfig struct {
 	PublicURL              string `mapstructure:"public_url"`
 	MaxFailedLogin         int    `mapstructure:"max_failed_login"`
 	FailedLoginIntervalMin int    `mapstructure:"failed_login_interval_mins"`
+	// WebAuthnRPID is the passkey Relying Party ID (a registrable domain, no
+	// scheme/port, e.g. "example.com" or "localhost"). Defaults to the host of
+	// auth_base_url. It must be a suffix of every WebAuthnOrigin host.
+	WebAuthnRPID string `mapstructure:"webauthn_rp_id"`
+	// WebAuthnOrigins is the list of full origins (scheme+host[:port]) allowed to
+	// perform passkey ceremonies. Defaults to allowed_origins.
+	WebAuthnOrigins []string `mapstructure:"webauthn_origins"`
 }
 
 // ExternalAuthConfig governs how social-login (external IdP) users are handled.

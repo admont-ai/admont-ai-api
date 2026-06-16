@@ -31,7 +31,11 @@ type Handler struct {
 	externalMode   string // "manual" | "approval" | "auto"
 	onUserChange   func()
 	authCodes      sync.Map
+	webauthn       *WebAuthnManager
 }
+
+// SetWebAuthn enables the passkey endpoints. When nil, they respond 501.
+func (h *Handler) SetWebAuthn(m *WebAuthnManager) { h.webauthn = m }
 
 func NewHandler(registry *Registry, jwt *JWTService, allowedOrigins []string, authn *Authenticator, usersStore *users.Store, externalMode string) *Handler {
 	return &Handler{

@@ -4,6 +4,7 @@ DROP TABLE IF EXISTS ai_messages;
 DROP TABLE IF EXISTS ai_conversations;
 DROP TABLE IF EXISTS user_group_members;
 DROP TABLE IF EXISTS user_groups;
+DROP TABLE IF EXISTS webauthn_credentials;
 DROP TABLE IF EXISTS credentials;
 DROP TABLE IF EXISTS users;
 DROP TABLE IF EXISTS search_repo_state;

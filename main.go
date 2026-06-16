@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"image/png"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -270,6 +271,27 @@ func main() {
 	}
 	authHandler := auth.NewHandler(httpRegistry, jwtService, cfg.AllowedOrigins, authenticator, db.Users, cfg.ExternalAuth.SignupMode)
 
+	// Passkey (WebAuthn) support for internal users. A user-verified passkey is
+	// multi-factor on its own, so a passkey login bypasses TOTP.
+	if authenticator != nil {
+		rpID := cfg.InternalAuth.WebAuthnRPID
+		if rpID == "" {
+			if u, err := url.Parse(baseURL); err == nil {
+				rpID = u.Hostname()
+			}
+		}
+		origins := cfg.InternalAuth.WebAuthnOrigins
+		if len(origins) == 0 {
+			origins = cfg.AllowedOrigins
+		}
+		if wm, err := auth.NewWebAuthnManager(db, rpID, "Admont", origins); err != nil {
+			log.WithError(err).Warn("failed to initialize passkey support — passkeys disabled")
+		} else {
+			authHandler.SetWebAuthn(wm)
+			log.WithFields(log.Fields{"rp_id": rpID, "origins": origins}).Info("passkey (WebAuthn) support enabled")
+		}
+	}
+
 	// --- Load users and groups from DB ---
 	users, err := db.Users.ListAllUsers(ctx)
 	if err != nil {
@@ -523,6 +545,9 @@ func main() {
 		internalGroup.POST("/login", middleware.RateLimit(loginLimiter), authHandler.InternalLogin)
 		internalGroup.POST("/totp", middleware.RateLimit(loginLimiter), authHandler.InternalTOTP)
 		internalGroup.POST("/signup", middleware.RateLimit(loginLimiter), authHandler.InternalSignup)
+		// Passkey (discoverable / usernameless) login.
+		internalGroup.POST("/webauthn/login/begin", middleware.RateLimit(loginLimiter), authHandler.WebAuthnLoginBegin)
+		internalGroup.POST("/webauthn/login/finish", middleware.RateLimit(loginLimiter), authHandler.WebAuthnLoginFinish)
 	}
 
 	// Create admin handler for runtime config management
@@ -589,6 +614,13 @@ func main() {
 
 	meGroup := r.Group("/me")
 	meGroup.Use(middleware.JWTAuth(jwtService))
+
+	// Passkey management for the logged-in internal user.
+	meGroup.POST("/webauthn/register/begin", authHandler.WebAuthnRegisterBegin)
+	meGroup.POST("/webauthn/register/finish", authHandler.WebAuthnRegisterFinish)
+	meGroup.GET("/webauthn/credentials", authHandler.WebAuthnList)
+	meGroup.PATCH("/webauthn/credentials/:id", authHandler.WebAuthnRename)
+	meGroup.DELETE("/webauthn/credentials/:id", authHandler.WebAuthnDelete)
 	fuegogin.Get(engine, meGroup, "/details", func(c fuego.ContextNoBody) (meDetailsResponse, error) {
 		gc := c.Context().(*gin.Context)
 		identity, _ := gc.Get(middleware.CtxUserIdentity)
