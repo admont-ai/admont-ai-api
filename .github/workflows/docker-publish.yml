@@ -2,7 +2,6 @@ name: Build and push Docker image
 
 on:
   push:
-    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -32,8 +31,9 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
+          # "latest" tracks the newest semver tag (metadata-action default
+          # latest=auto). Only runs on v* tag pushes, never on branch commits.
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=short
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
