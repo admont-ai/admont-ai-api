@@ -281,28 +281,28 @@ func (h *Helper) listAllFiles(subfolder string) ([]string, error) {
 
 // GetFileHistory returns the change history for a file.
 func (h *Helper) GetFileHistory(subfolder string, filename string) ([]FileChange, error) {
-	log.WithFields(log.Fields{"subfolder": subfolder, "filename": filename}).Info("getting file history")
+	log.WithFields(log.Fields{"subfolder": subfolder, "filename": filename}).Debug("getting file history")
 	filePath := filepath.Join(subfolder, filename)
 	return h.client.GetFileHistory(filePath)
 }
 
 // GetFileAtCommit returns the content of a file at a specific commit.
 func (h *Helper) GetFileAtCommit(commitHash string, subfolder string, filename string) (string, error) {
-	log.WithFields(log.Fields{"commit": commitHash, "subfolder": subfolder, "filename": filename}).Info("getting file at commit")
+	log.WithFields(log.Fields{"commit": commitHash, "subfolder": subfolder, "filename": filename}).Debug("getting file at commit")
 	filePath := filepath.Join(subfolder, filename)
 	return h.client.GetFileAtCommit(commitHash, filePath)
 }
 
 // GetFileDiffWithCommit returns a diff between a specific commit and HEAD for a file.
 func (h *Helper) GetFileDiffWithCommit(commitHash string, subfolder string, filename string) (string, error) {
-	log.WithFields(log.Fields{"commit": commitHash, "subfolder": subfolder, "filename": filename}).Info("getting file diff with commit")
+	log.WithFields(log.Fields{"commit": commitHash, "subfolder": subfolder, "filename": filename}).Debug("getting file diff with commit")
 	filePath := filepath.Join(subfolder, filename)
 	return h.client.GetFileDiffWithCommit(commitHash, filePath)
 }
 
 // GetFileCommitHash returns the most recent commit hash for a file.
 func (h *Helper) GetFileCommitHash(subfolder string, filename string) (string, error) {
-	log.WithFields(log.Fields{"subfolder": subfolder, "filename": filename}).Info("getting file commit hash")
+	log.WithFields(log.Fields{"subfolder": subfolder, "filename": filename}).Debug("getting file commit hash")
 	filePath := filepath.Join(subfolder, filename)
 	return h.client.GetFileCommitHash(filePath)
 }

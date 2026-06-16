@@ -105,6 +105,9 @@ func ginLogrus() gin.HandlerFunc {
 			entry.Error("server error")
 		} else if c.Writer.Status() >= 400 {
 			entry.Warn("client error")
+		} else if c.Request.Method == http.MethodGet {
+			// Read-only GETs (document fetches, etc.) are noisy — keep at debug.
+			entry.Debug("request")
 		} else {
 			entry.Info("request")
 		}
@@ -138,6 +141,12 @@ func main() {
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
+	}
+
+	if lvl, err := log.ParseLevel(cfg.LogLevel); err == nil {
+		log.SetLevel(lvl)
+	} else if cfg.LogLevel != "" {
+		log.WithField("log_level", cfg.LogLevel).Warn("invalid log_level; using info")
 	}
 
 	// Log the effective configuration (defaults + config file + env overrides),

@@ -67,6 +67,7 @@ type Config struct {
 	Hostname        string             `mapstructure:"hostname"`
 	Port            int                `mapstructure:"port"`
 	ReleaseMode     bool               `mapstructure:"release_mode"`
+	LogLevel        string             `mapstructure:"log_level"`
 	AllowedOrigins  []string           `mapstructure:"allowed_origins"`
 	TrustedProxies  []string           `mapstructure:"trusted_proxies"`
 	EncryptionKey   string             `mapstructure:"encryption_key"`
@@ -107,6 +108,7 @@ func Load() (*Config, error) {
 
 	viper.SetDefault("hostname", "0.0.0.0")
 	viper.SetDefault("port", 8080)
+	viper.SetDefault("log_level", "info")
 	viper.SetDefault("allowed_origins", "http://localhost:5173")
 	viper.SetDefault("database.hostname", "localhost")
 	viper.SetDefault("database.port", 5433)
@@ -139,6 +141,7 @@ func Load() (*Config, error) {
 	_ = viper.BindEnv("trusted_proxies", "TRUSTED_PROXIES")
 	_ = viper.BindEnv("jwt_secret", "JWT_SECRET")
 	_ = viper.BindEnv("auth_base_url", "AUTH_BASE_URL")
+	_ = viper.BindEnv("log_level", "LOG_LEVEL")
 	_ = viper.BindEnv("languagetool_url", "LANGUAGETOOL_URL")
 	_ = viper.BindEnv("import_path", "IMPORT_PATH")
 	_ = viper.BindEnv("encryption_key", "ADMONT_ENCRYPTION_KEY")
