@@ -79,7 +79,13 @@ func (h *LLMRequesthandler) GetModels(c fuego.ContextNoBody) ([]llm.Model, error
 	if client == nil || !client.HasProviders() {
 		return []llm.Model{}, nil
 	}
-	return client.AllModels(), nil
+	models := client.AllModels()
+	if models == nil {
+		// Never return null (e.g. a freshly added provider whose models are not
+		// loaded yet) — the clients expect an array.
+		models = []llm.Model{}
+	}
+	return models, nil
 }
 
 func (h *LLMRequesthandler) HandleLLM(c fuego.ContextWithBody[llmRequest]) (llmResponse, error) {
