@@ -1497,9 +1497,9 @@ func setUsageHook(client *llm.Client, tracker *usage.Tracker) {
 	if tracker == nil {
 		return
 	}
-	client.SetUsageHook(func(ctx context.Context, input, output int64) {
+	client.SetUsageHook(func(ctx context.Context, provider string, input, output int64) {
 		if key := usage.IdentityFrom(ctx); key != "" {
-			tracker.Add(key, input, output)
+			tracker.Add(key, provider, input, output)
 		}
 	})
 }

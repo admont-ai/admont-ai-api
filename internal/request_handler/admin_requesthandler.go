@@ -2096,14 +2096,23 @@ func (h *AdminRequesthandler) SetDailyTokenLimits(c fuego.ContextWithBody[usage.
 	return body, nil
 }
 
-// llmUsageRow is one user's current daily usage and effective caps (0 = unlimited).
+// providerUsage is one provider's contribution to an identity's daily usage.
+type providerUsage struct {
+	Provider   string `json:"provider"`
+	InputUsed  int64  `json:"input_used"`
+	OutputUsed int64  `json:"output_used"`
+}
+
+// llmUsageRow is one user's current daily usage (combined across providers) and
+// effective caps (0 = unlimited), with a per-provider breakdown.
 type llmUsageRow struct {
-	Identity    string `json:"identity"`
-	Email       string `json:"email,omitempty"`
-	InputUsed   int64  `json:"input_used"`
-	OutputUsed  int64  `json:"output_used"`
-	InputLimit  int64  `json:"input_limit"`
-	OutputLimit int64  `json:"output_limit"`
+	Identity    string          `json:"identity"`
+	Email       string          `json:"email,omitempty"`
+	InputUsed   int64           `json:"input_used"`
+	OutputUsed  int64           `json:"output_used"`
+	InputLimit  int64           `json:"input_limit"`
+	OutputLimit int64           `json:"output_limit"`
+	Providers   []providerUsage `json:"providers"`
 }
 
 // GetLLMUsage returns the current in-memory daily token usage for every tracked
@@ -2117,14 +2126,23 @@ func (h *AdminRequesthandler) GetLLMUsage(c fuego.ContextNoBody) ([]llmUsageRow,
 	snap := h.usageTracker.Snapshot()
 
 	rows := make([]llmUsageRow, 0, len(snap))
-	for key, u := range snap {
+	for key, byProvider := range snap {
 		row := llmUsageRow{
 			Identity:    key,
-			InputUsed:   u.Input,
-			OutputUsed:  u.Output,
 			InputLimit:  def.Input,
 			OutputLimit: def.Output,
 		}
+		for provider, u := range byProvider {
+			row.InputUsed += u.Input
+			row.OutputUsed += u.Output
+			row.Providers = append(row.Providers, providerUsage{
+				Provider:   provider,
+				InputUsed:  u.Input,
+				OutputUsed: u.Output,
+			})
+		}
+		sort.Slice(row.Providers, func(i, j int) bool { return row.Providers[i].Provider < row.Providers[j].Provider })
+		// key is "authProvider:email" — resolve the user for email + per-user caps.
 		if provider, email, ok := strings.Cut(key, ":"); ok {
 			if ue, err := h.store.Users.GetUser(ctx, provider, email); err == nil && ue != nil {
 				row.Email = ue.Email
