@@ -146,6 +146,8 @@ func Load() (*Config, error) {
 	_ = viper.BindEnv("import_path", "IMPORT_PATH")
 	_ = viper.BindEnv("encryption_key", "ADMONT_ENCRYPTION_KEY")
 	_ = viper.BindEnv("external_auth.signup_mode", "EXTERNAL_AUTH_SIGNUP_MODE")
+	_ = viper.BindEnv("internal_auth.webauthn_rp_id", "INTERNAL_AUTH_WEBAUTHN_RP_ID")
+	_ = viper.BindEnv("internal_auth.webauthn_origins", "INTERNAL_AUTH_WEBAUTHN_ORIGINS")
 	_ = viper.BindEnv("internal_auth.password_min_length", "INTERNAL_AUTH_PASSWORD_MIN_LENGTH")
 	_ = viper.BindEnv("internal_auth.password_require_uppercase", "INTERNAL_AUTH_PASSWORD_REQUIRE_UPPERCASE")
 	_ = viper.BindEnv("internal_auth.password_require_lowercase", "INTERNAL_AUTH_PASSWORD_REQUIRE_LOWERCASE")
