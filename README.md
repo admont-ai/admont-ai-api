@@ -82,15 +82,67 @@ To remove a mistaken tag before relying on it: `git push origin :refs/tags/v0.1.
 
 ## Configuration
 
-Configuration is read from environment variables (a local `.env` is supported) or a `config.yaml`. The essentials:
+Configuration is read from environment variables (a local `.env` is supported) or a `config.yaml`; environment variables take precedence. The complete set of environment variables is below.
 
-| Variable | Purpose |
-|---|---|
-| `DATABASE_USERNAME` / `DATABASE_PASSWORD` / `DATABASE_HOSTNAME` / `DATABASE_PORT` / `DATABASE_DB` | PostgreSQL connection |
-| `JWT_SECRET` | Signing key for access/refresh tokens |
-| `ADMONT_ENCRYPTION_KEY` | 32-byte hex key for encrypting secrets at rest (recommended in production) |
-| `ALLOWED_ORIGINS` | Comma-separated frontend origins (CORS + OAuth redirect allow-list) |
-| `EXTERNAL_AUTH_SIGNUP_MODE` | `manual` \| `approval` \| `auto` for social-login users |
+### Server
+
+| Variable | Default | Description |
+|---|---|---|
+| `HOSTNAME` | `0.0.0.0` | Address the HTTP server binds to |
+| `PORT` | `8080` | HTTP listen port |
+| `LOG_LEVEL` | `info` | Log verbosity (`debug`, `info`, `warn`, `error`) |
+| `GIN_MODE` | _(unset)_ | Set to `release` to run Gin in production mode |
+
+### Database (PostgreSQL + pgvector)
+
+| Variable | Default | Description |
+|---|---|---|
+| `DATABASE_USERNAME` | _(required)_ | PostgreSQL user — startup fails if unset |
+| `DATABASE_PASSWORD` | _(empty)_ | PostgreSQL password |
+| `DATABASE_HOSTNAME` | `localhost` | Database host |
+| `DATABASE_PORT` | `5433` | Database port |
+| `DATABASE_DB` | `admont-ai` | Database name |
+| `DATABASE_SSL` | `false` | Use TLS (`sslmode=require`) for the connection |
+
+### Authentication & security
+
+| Variable | Default | Description |
+|---|---|---|
+| `JWT_SECRET` | _(empty)_ | Signing key for access/refresh tokens — set a strong value in production |
+| `ADMONT_ENCRYPTION_KEY` | _(empty)_ | 32-byte hex key for encrypting secrets at rest (recommended in production) |
+| `AUTH_BASE_URL` | _(empty)_ | Public base URL of this API, used for OAuth redirects and as the default passkey RP/origin |
+| `ALLOWED_ORIGINS` | `http://localhost:5173` | Comma-separated frontend origins (CORS + OAuth redirect allow-list) |
+| `TRUSTED_PROXIES` | _(none)_ | Comma-separated proxy CIDRs/IPs trusted for client-IP resolution (rate limiting) |
+
+### Signup & password policy
+
+| Variable | Default | Description |
+|---|---|---|
+| `EXTERNAL_AUTH_SIGNUP_MODE` | `manual` | Social-login handling: `manual` (admin pre-adds), `approval` (first login awaits approval), or `auto` (auto-provision) |
+| `INTERNAL_AUTH_PASSWORD_MIN_LENGTH` | `8` | Minimum password length for internal users |
+| `INTERNAL_AUTH_PASSWORD_REQUIRE_UPPERCASE` | `false` | Require an uppercase letter |
+| `INTERNAL_AUTH_PASSWORD_REQUIRE_LOWERCASE` | `false` | Require a lowercase letter |
+| `INTERNAL_AUTH_PASSWORD_REQUIRE_DIGIT` | `false` | Require a digit |
+| `INTERNAL_AUTH_PASSWORD_REQUIRE_SYMBOL` | `false` | Require a symbol |
+
+### Search (semantic embeddings)
+
+| Variable | Default | Description |
+|---|---|---|
+| `SEARCH_ONNX_RUNTIME_PATH` | `/opt/homebrew/lib/libonnxruntime.dylib` | Path to the ONNX Runtime shared library (the container image sets this to its Linux `.so`) |
+| `SEARCH_MODEL_PATH` | `models/model.onnx` | Path to the embedding model |
+| `SEARCH_VOCAB_PATH` | `models/vocab.txt` | Path to the model vocabulary |
+
+### Storage paths & integrations
+
+| Variable | Default | Description |
+|---|---|---|
+| `REPO_CLONE_PATH` | `/tmp/admont-api/repos` | Working directory for cloned Git repositories |
+| `LOCAL_REPO_PATH` | `/tmp/admont-api/local-repos` | Working directory for local (non-Git) repositories |
+| `IMPORT_PATH` | `/tmp/admont-api/import` | Staging directory for content imports |
+| `LANGUAGETOOL_URL` | _(empty)_ | Base URL of a LanguageTool server for grammar/spell checking |
+
+> A few advanced options are only settable via `config.yaml` (not environment variables), including `internal_auth.enabled`, `internal_auth.admin_url`/`public_url`, `internal_auth.max_failed_login`, `internal_auth.failed_login_interval_mins`, and the passkey settings `internal_auth.webauthn_rp_id` / `internal_auth.webauthn_origins`.
 
 See the documentation for the complete configuration reference, architecture, and API details.
 
