@@ -16,26 +16,30 @@ type UserEntry struct {
 	ID int `yaml:"-" json:"id"`
 	// Internal is derived from Provider (== "internal") and kept for API
 	// compatibility; it is populated when scanning rows, not stored directly.
-	Internal          bool     `yaml:"-" json:"internal"`
-	Provider          string   `yaml:"provider" json:"provider"`
-	Email             string   `yaml:"email" json:"email"`
-	Username          string   `yaml:"username,omitempty" json:"username,omitempty"`
-	FirstName         string   `yaml:"first_name" json:"first_name"`
-	LastName          string   `yaml:"last_name" json:"last_name"`
-	SuperAdmin        bool     `yaml:"super_admin" json:"super_admin"`
-	Roles             []string `yaml:"roles" json:"roles"`
+	Internal   bool     `yaml:"-" json:"internal"`
+	Provider   string   `yaml:"provider" json:"provider"`
+	Email      string   `yaml:"email" json:"email"`
+	Username   string   `yaml:"username,omitempty" json:"username,omitempty"`
+	FirstName  string   `yaml:"first_name" json:"first_name"`
+	LastName   string   `yaml:"last_name" json:"last_name"`
+	SuperAdmin bool     `yaml:"super_admin" json:"super_admin"`
+	Roles      []string `yaml:"roles" json:"roles"`
 	// Status is the account lifecycle state: "active", "pending" (self-signup
 	// awaiting approval), "invited" (admin pre-added, activates on first login),
 	// or "suspended" (blocked).
-	Status            string   `yaml:"-" json:"status,omitempty"`
-	TOTPEnabled       bool     `yaml:"-" json:"totp_enabled,omitempty"`
-	PasswordExpired   bool     `yaml:"-" json:"password_expired,omitempty"`
+	Status          string `yaml:"-" json:"status,omitempty"`
+	TOTPEnabled     bool   `yaml:"-" json:"totp_enabled,omitempty"`
+	PasswordExpired bool   `yaml:"-" json:"password_expired,omitempty"`
 	// Suspended is derived from Status (== "suspended") for API/UI compatibility;
 	// it is not stored separately.
-	Suspended         bool     `yaml:"-" json:"suspended,omitempty"`
-	PasswordChangedAt string   `yaml:"-" json:"password_changed_at,omitempty"`
-	CreatedAt         string   `yaml:"-" json:"created_at,omitempty"`
-	UpdatedAt         string   `yaml:"-" json:"updated_at,omitempty"`
+	Suspended         bool   `yaml:"-" json:"suspended,omitempty"`
+	PasswordChangedAt string `yaml:"-" json:"password_changed_at,omitempty"`
+	// DailyInputTokenLimit / DailyOutputTokenLimit are the per-user daily LLM
+	// token caps. nil = inherit the global default; 0 = unlimited.
+	DailyInputTokenLimit  *int64 `yaml:"daily_input_token_limit,omitempty" json:"daily_input_token_limit,omitempty"`
+	DailyOutputTokenLimit *int64 `yaml:"daily_output_token_limit,omitempty" json:"daily_output_token_limit,omitempty"`
+	CreatedAt             string `yaml:"-" json:"created_at,omitempty"`
+	UpdatedAt             string `yaml:"-" json:"updated_at,omitempty"`
 }
 
 // Identity returns the canonical "provider:email" identity string.

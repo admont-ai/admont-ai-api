@@ -40,6 +40,7 @@ import (
 	"github.com/christianfischer/md-wiki-server/internal/store/git_repo"
 	llm_provider "github.com/christianfischer/md-wiki-server/internal/store/llm_provider"
 	storesearch "github.com/christianfischer/md-wiki-server/internal/store/search_provider"
+	"github.com/christianfischer/md-wiki-server/internal/usage"
 	"github.com/pquerna/otp/totp"
 	"golang.org/x/crypto/bcrypt"
 
@@ -369,8 +370,12 @@ func main() {
 	modelRegistry.RegisterDefault("perplexity", llm.PerplexityDefaultModel)
 	modelRegistry.RegisterDefault("xai", llm.XAIDefaultModel)
 
+	// --- Per-user daily LLM token usage (in-memory, reset 00:00 UTC) ---
+	usageTracker := usage.NewTracker()
+	usageTracker.StartDailyReset(ctx)
+
 	// --- LLM client from DB ---
-	llmClient := buildLLMClient(db, modelRegistry)
+	llmClient := buildLLMClient(db, modelRegistry, usageTracker)
 
 	// Fetch models dynamically at startup (with timeout)
 	fetchCtx, fetchCancel := context.WithTimeout(ctx, 60*time.Second)
@@ -578,8 +583,9 @@ func main() {
 	adminHandler.SetIndexer(searchIndexer)
 	adminHandler.SetSearchBackend(backendHolder, repoStateStore)
 	adminHandler.SetSearchBackendFactory(searchBackendFactory)
+	adminHandler.SetUsageTracker(usageTracker)
 	adminHandler.SetLLMRebuild(func() {
-		newClient := buildLLMClient(db, modelRegistry)
+		newClient := buildLLMClient(db, modelRegistry, usageTracker)
 		llmHandler.SetClient(newClient)
 		ragHandler.SetClient(newClient)
 		agentHandler.SetClient(newClient)
@@ -994,7 +1000,8 @@ func main() {
 		fuego.OptionTags("LLM"),
 		fuego.OptionSummary("List available LLM models"),
 	)
-	fuegogin.Post(engine, llmGroup, "", llmHandler.HandleLLM,
+	llmActionGroup := llmGroup.Group("", middleware.TokenQuota(usageTracker, db))
+	fuegogin.Post(engine, llmActionGroup, "", llmHandler.HandleLLM,
 		fuego.OptionTags("LLM"),
 		fuego.OptionSummary("LLM-powered document actions"),
 	)
@@ -1044,7 +1051,8 @@ func main() {
 		fuego.OptionTags("Files"),
 		fuego.OptionSummary("List all files and folders"),
 	)
-	fuegogin.Post(engine, repo, "/agent", agentHandler.Agent,
+	agentGroup := repo.Group("", middleware.TokenQuota(usageTracker, db))
+	fuegogin.Post(engine, agentGroup, "/agent", agentHandler.Agent,
 		fuego.OptionTags("RAG"),
 		fuego.OptionSummary("Agentic AI assistant with repo-scoped file tools"),
 	)
@@ -1294,6 +1302,26 @@ func main() {
 		fuego.OptionTags("Admin"),
 		fuego.OptionSummary("Set per-action LLM token limits"),
 	)
+	fuegogin.Get(engine, adminLLMGroup, "/usage-limits", adminHandler.GetDailyTokenLimits,
+		fuego.OptionTags("Admin"),
+		fuego.OptionSummary("Get the global default per-user daily token limits"),
+	)
+	fuegogin.Put(engine, adminLLMGroup, "/usage-limits", adminHandler.SetDailyTokenLimits,
+		fuego.OptionTags("Admin"),
+		fuego.OptionSummary("Set the global default per-user daily token limits"),
+	)
+	fuegogin.Get(engine, adminLLMGroup, "/usage", adminHandler.GetLLMUsage,
+		fuego.OptionTags("Admin"),
+		fuego.OptionSummary("Get current per-user daily token usage"),
+	)
+	fuegogin.Post(engine, adminLLMGroup, "/usage/reset", adminHandler.ResetLLMUsage,
+		fuego.OptionTags("Admin"),
+		fuego.OptionSummary("Reset current daily token usage for one user"),
+	)
+	fuegogin.Post(engine, adminLLMGroup, "/usage/reset-all", adminHandler.ResetAllLLMUsage,
+		fuego.OptionTags("Admin"),
+		fuego.OptionSummary("Reset current daily token usage for all users"),
+	)
 	fuegogin.Get(engine, adminLLMGroup, "/:name/models", adminHandler.GetLLMProviderModels,
 		fuego.OptionTags("Admin"),
 		fuego.OptionSummary("List available models of an LLM provider"),
@@ -1367,7 +1395,9 @@ func main() {
 		fuego.OptionTags("Search"),
 		fuego.OptionSummary("Search index status"),
 	)
-	fuegogin.Post(engine, searchGroup, "/rag", ragHandler.RAG,
+	// RAG is an LLM call, so it also enforces the per-user daily token quota.
+	ragGroup := repos.Group("", middleware.RateLimit(searchRateLimiter), middleware.TokenQuota(usageTracker, db))
+	fuegogin.Post(engine, ragGroup, "/rag", ragHandler.RAG,
 		fuego.OptionTags("RAG"),
 		fuego.OptionSummary("Retrieval-augmented generation Q&A"),
 	)
@@ -1430,14 +1460,19 @@ func initSearchBackend(providerType string, providerConfig map[string]string, fa
 const llmTokenLimitsKey = "llm_token_limits"
 
 // buildLLMClient creates an LLM client from all providers stored in the database.
-func buildLLMClient(db *store.Store, registry *llm.ModelRegistry) *llm.Client {
+// The tracker, when non-nil, receives per-call token usage attributed to the
+// request's user identity (set by the TokenQuota middleware).
+func buildLLMClient(db *store.Store, registry *llm.ModelRegistry, tracker *usage.Tracker) *llm.Client {
 	providers, err := db.LLM.ListLLMProviders(context.Background())
 	if err != nil {
 		log.WithError(err).Error("failed to load LLM providers from database")
-		return llm.NewClient(registry)
+		client := llm.NewClient(registry)
+		setUsageHook(client, tracker)
+		return client
 	}
 
 	client := llm.NewClient(registry)
+	setUsageHook(client, tracker)
 	for _, cfg := range providers {
 		if cfg.APIKey == "" && cfg.ProviderType != "ollama" {
 			continue
@@ -1455,6 +1490,18 @@ func buildLLMClient(db *store.Store, registry *llm.ModelRegistry) *llm.Client {
 		}
 	}
 	return client
+}
+
+// setUsageHook attaches the per-user token usage recorder to an LLM client.
+func setUsageHook(client *llm.Client, tracker *usage.Tracker) {
+	if tracker == nil {
+		return
+	}
+	client.SetUsageHook(func(ctx context.Context, input, output int64) {
+		if key := usage.IdentityFrom(ctx); key != "" {
+			tracker.Add(key, input, output)
+		}
+	})
 }
 
 // registerLLMProvider creates and registers a provider + fetcher for the given config.
