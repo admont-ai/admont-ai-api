@@ -361,6 +361,7 @@ func main() {
 	// --- Model registry ---
 	modelRegistry := llm.NewModelRegistry()
 	modelRegistry.RegisterDefault("anthropic", llm.AnthropicDefaultModel)
+	modelRegistry.RegisterDefault("bedrock", llm.Model{})
 	modelRegistry.RegisterDefault("deepseek", llm.DeepSeekDefaultModel)
 	modelRegistry.RegisterDefault("google", llm.GoogleDefaultModel)
 	modelRegistry.RegisterDefault("meta", llm.MetaDefaultModel)
@@ -1474,10 +1475,13 @@ func buildLLMClient(db *store.Store, registry *llm.ModelRegistry, tracker *usage
 	client := llm.NewClient(registry)
 	setUsageHook(client, tracker)
 	for _, cfg := range providers {
-		if cfg.APIKey == "" && cfg.ProviderType != "ollama" {
+		if cfg.APIKey == "" && cfg.ProviderType != "ollama" && cfg.ProviderType != "bedrock" {
 			continue
 		}
-		registerLLMProvider(client, registry, cfg)
+		if err := registerLLMProvider(client, registry, cfg); err != nil {
+			log.WithError(err).WithFields(log.Fields{"name": cfg.Name, "type": cfg.ProviderType}).Error("failed to load LLM provider")
+			continue
+		}
 		log.WithFields(log.Fields{"name": cfg.Name, "type": cfg.ProviderType}).Info("LLM provider loaded")
 	}
 
@@ -1505,7 +1509,7 @@ func setUsageHook(client *llm.Client, tracker *usage.Tracker) {
 }
 
 // registerLLMProvider creates and registers a provider + fetcher for the given config.
-func registerLLMProvider(client *llm.Client, registry *llm.ModelRegistry, cfg llm_provider.LLMConfig) {
+func registerLLMProvider(client *llm.Client, registry *llm.ModelRegistry, cfg llm_provider.LLMConfig) error {
 	maxTokens := cfg.MaxTokens
 	if maxTokens == 0 {
 		// Reasoning models (o-series, gpt-5.x) consume the completion budget
@@ -1540,13 +1544,24 @@ func registerLLMProvider(client *llm.Client, registry *llm.ModelRegistry, cfg ll
 	case "ollama":
 		provider = llm.NewOllamaProvider(cfg.BaseURL, maxTokens)
 		registry.RegisterFetcher(provType, llm.NewOpenAICompatFetcher(provType, "ollama", cfg.BaseURL))
-	default:
+	case "anthropic":
 		provider = llm.NewAnthropicProvider(cfg.APIKey, maxTokens)
 		registry.RegisterFetcher(provType, llm.NewAnthropicFetcher(cfg.APIKey))
+	case "bedrock":
+		bedrockProvider, err := llm.NewBedrockProvider(context.Background(), cfg.Region, cfg.DefaultModel, maxTokens)
+		if err != nil {
+			return err
+		}
+		provider = bedrockProvider
+		registry.RegisterDefault(provType, bedrockProvider.DefaultModel())
+		registry.RegisterFetcher(provType, bedrockProvider)
+	default:
+		return fmt.Errorf("unsupported LLM provider type %q", provType)
 	}
 	registry.MarkConfigured(provType)
 	registry.SetFavourites(provType, cfg.FavouriteModels)
 	client.AddProvider(provType, provider)
+	return nil
 }
 
 // buildPgvectorDSN returns a PostgreSQL DSN for the search backend.

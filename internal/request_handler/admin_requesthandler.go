@@ -1897,6 +1897,7 @@ type llmProviderResponse struct {
 	ProviderType    string   `json:"provider_type"`
 	APIKey          string   `json:"api_key"`
 	BaseURL         string   `json:"base_url,omitempty"`
+	Region          string   `json:"region,omitempty"`
 	MaxTokens       int64    `json:"max_tokens"`
 	DefaultModel    string   `json:"default_model"`
 	FavouriteModels []string `json:"favourite_models"`
@@ -1907,6 +1908,7 @@ type addLLMProviderRequest struct {
 	ProviderType    string   `json:"provider_type" validate:"required"`
 	APIKey          string   `json:"api_key"`
 	BaseURL         string   `json:"base_url"`
+	Region          string   `json:"region"`
 	MaxTokens       int64    `json:"max_tokens"`
 	DefaultModel    string   `json:"default_model"`
 	FavouriteModels []string `json:"favourite_models"`
@@ -1916,6 +1918,7 @@ type updateLLMProviderRequest struct {
 	ProviderType    string   `json:"provider_type"`
 	APIKey          string   `json:"api_key"`
 	BaseURL         string   `json:"base_url"`
+	Region          string   `json:"region"`
 	MaxTokens       int64    `json:"max_tokens"`
 	DefaultModel    string   `json:"default_model"`
 	FavouriteModels []string `json:"favourite_models"`
@@ -1956,6 +1959,7 @@ func (h *AdminRequesthandler) GetSupportedLLMProviders(c fuego.ContextNoBody) ([
 	}
 	providers := []providerDef{
 		{"anthropic", "api_key"},
+		{"bedrock", "region"},
 		{"deepseek", "api_key"},
 		{"google", "api_key"},
 		{"meta", "api_key"},
@@ -1994,6 +1998,7 @@ func (h *AdminRequesthandler) GetLLMProviders(c fuego.ContextNoBody) ([]llmProvi
 			ProviderType:    p.ProviderType,
 			APIKey:          obfuscateAPIKey(p.APIKey),
 			BaseURL:         p.BaseURL,
+			Region:          p.Region,
 			MaxTokens:       p.MaxTokens,
 			DefaultModel:    p.DefaultModel,
 			FavouriteModels: p.FavouriteModels,
@@ -2224,12 +2229,16 @@ func (h *AdminRequesthandler) AddLLMProvider(c fuego.ContextWithBody[addLLMProvi
 	if body.ProviderType == "" {
 		return llmProviderResponse{}, fuego.BadRequestError{Detail: "provider_type is required"}
 	}
+	if body.ProviderType == "bedrock" && strings.TrimSpace(body.Region) == "" {
+		return llmProviderResponse{}, fuego.BadRequestError{Detail: "region is required for bedrock"}
+	}
 
 	p := storellm.LLMConfig{
 		Name:            body.Name,
 		ProviderType:    body.ProviderType,
 		APIKey:          body.APIKey,
 		BaseURL:         body.BaseURL,
+		Region:          body.Region,
 		MaxTokens:       body.MaxTokens,
 		DefaultModel:    body.DefaultModel,
 		FavouriteModels: body.FavouriteModels,
@@ -2249,6 +2258,7 @@ func (h *AdminRequesthandler) AddLLMProvider(c fuego.ContextWithBody[addLLMProvi
 		ProviderType:    p.ProviderType,
 		APIKey:          obfuscateAPIKey(p.APIKey),
 		BaseURL:         p.BaseURL,
+		Region:          p.Region,
 		MaxTokens:       p.MaxTokens,
 		DefaultModel:    p.DefaultModel,
 		FavouriteModels: p.FavouriteModels,
@@ -2284,6 +2294,12 @@ func (h *AdminRequesthandler) UpdateLLMProvider(c fuego.ContextWithBody[updateLL
 	if body.BaseURL != "" {
 		existing.BaseURL = body.BaseURL
 	}
+	if body.Region != "" {
+		existing.Region = body.Region
+	}
+	if existing.ProviderType == "bedrock" && strings.TrimSpace(existing.Region) == "" {
+		return llmProviderResponse{}, fuego.BadRequestError{Detail: "region is required for bedrock"}
+	}
 	if body.MaxTokens != 0 {
 		existing.MaxTokens = body.MaxTokens
 	}
@@ -2308,6 +2324,7 @@ func (h *AdminRequesthandler) UpdateLLMProvider(c fuego.ContextWithBody[updateLL
 		ProviderType:    existing.ProviderType,
 		APIKey:          obfuscateAPIKey(existing.APIKey),
 		BaseURL:         existing.BaseURL,
+		Region:          existing.Region,
 		MaxTokens:       existing.MaxTokens,
 		DefaultModel:    existing.DefaultModel,
 		FavouriteModels: existing.FavouriteModels,

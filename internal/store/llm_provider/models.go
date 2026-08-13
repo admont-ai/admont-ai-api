@@ -5,6 +5,7 @@ type LLMConfig struct {
 	ProviderType    string   `mapstructure:"provider_type"`
 	APIKey          string   `mapstructure:"api_key"`
 	BaseURL         string   `mapstructure:"base_url"`
+	Region          string   `mapstructure:"region"`
 	MaxTokens       int64    `mapstructure:"max_tokens"`
 	DefaultModel    string   `mapstructure:"default_model"`
 	FavouriteModels []string `mapstructure:"favourite_models"`
