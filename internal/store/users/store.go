@@ -27,6 +27,7 @@ func NewStore(pool *pgxpool.Pool) *Store {
 const userColumns = `
 	u.id, u.provider, u.email, u.username, u.first_name, u.last_name, u.super_admin, u.roles, u.status,
 	COALESCE(c.password_expired, FALSE), c.password_changed_at, COALESCE(c.totp_enabled, FALSE),
+	u.daily_input_token_limit, u.daily_output_token_limit,
 	u.created_at, u.updated_at`
 
 // scanUser scans a row produced with userColumns into a UserEntry.
@@ -36,7 +37,8 @@ func scanUser(row pgx.Row) (*UserEntry, error) {
 	var pwChangedAt *time.Time
 	var createdAt, updatedAt time.Time
 	if err := row.Scan(&u.ID, &u.Provider, &u.Email, &username, &u.FirstName, &u.LastName, &u.SuperAdmin,
-		&u.Roles, &u.Status, &u.PasswordExpired, &pwChangedAt, &u.TOTPEnabled, &createdAt, &updatedAt); err != nil {
+		&u.Roles, &u.Status, &u.PasswordExpired, &pwChangedAt, &u.TOTPEnabled,
+		&u.DailyInputTokenLimit, &u.DailyOutputTokenLimit, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
 	if username != nil {
@@ -175,16 +177,20 @@ func (s *Store) UpsertUser(ctx context.Context, u UserEntry) error {
 		usernameArg = u.Username
 	}
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO users (provider, email, username, first_name, last_name, super_admin, roles, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO users (provider, email, username, first_name, last_name, super_admin, roles, status,
+			daily_input_token_limit, daily_output_token_limit)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT (provider, email) DO UPDATE SET
 			username = EXCLUDED.username,
 			first_name = EXCLUDED.first_name,
 			last_name = EXCLUDED.last_name,
 			super_admin = EXCLUDED.super_admin,
 			roles = EXCLUDED.roles,
-			status = EXCLUDED.status
-	`, provider, u.Email, usernameArg, u.FirstName, u.LastName, u.SuperAdmin, u.Roles, status)
+			status = EXCLUDED.status,
+			daily_input_token_limit = EXCLUDED.daily_input_token_limit,
+			daily_output_token_limit = EXCLUDED.daily_output_token_limit
+	`, provider, u.Email, usernameArg, u.FirstName, u.LastName, u.SuperAdmin, u.Roles, status,
+		u.DailyInputTokenLimit, u.DailyOutputTokenLimit)
 	if err != nil {
 		return fmt.Errorf("upserting user %s:%s: %w", provider, u.Email, err)
 	}

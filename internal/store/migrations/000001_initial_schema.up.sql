@@ -105,6 +105,9 @@ CREATE TABLE users (
     super_admin BOOLEAN NOT NULL DEFAULT FALSE,
     roles       user_role[] NOT NULL DEFAULT '{}',
     status      user_status NOT NULL DEFAULT 'active',
+    -- Per-user daily LLM token caps. NULL = inherit the global default; 0 = unlimited.
+    daily_input_token_limit  BIGINT,
+    daily_output_token_limit BIGINT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (provider, email)

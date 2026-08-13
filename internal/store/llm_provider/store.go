@@ -21,7 +21,7 @@ func NewStore(pool *pgxpool.Pool, encrypt, decrypt func(string) (string, error))
 // ListLLMProviders returns all LLM providers from the database.
 func (s *Store) ListLLMProviders(ctx context.Context) ([]LLMConfig, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT name, provider_type, api_key, base_url, max_tokens, default_model, favourite_models
+		SELECT name, provider_type, api_key, base_url, region, max_tokens, default_model, favourite_models
 		FROM llm_providers ORDER BY name
 	`)
 	if err != nil {
@@ -32,7 +32,7 @@ func (s *Store) ListLLMProviders(ctx context.Context) ([]LLMConfig, error) {
 	var providers []LLMConfig
 	for rows.Next() {
 		var p LLMConfig
-		if err := rows.Scan(&p.Name, &p.ProviderType, &p.APIKey, &p.BaseURL, &p.MaxTokens, &p.DefaultModel, &p.FavouriteModels); err != nil {
+		if err := rows.Scan(&p.Name, &p.ProviderType, &p.APIKey, &p.BaseURL, &p.Region, &p.MaxTokens, &p.DefaultModel, &p.FavouriteModels); err != nil {
 			return nil, err
 		}
 		if decrypted, err := s.decrypt(p.APIKey); err == nil {
@@ -47,9 +47,9 @@ func (s *Store) ListLLMProviders(ctx context.Context) ([]LLMConfig, error) {
 func (s *Store) GetLLMProvider(ctx context.Context, name string) (*LLMConfig, error) {
 	var p LLMConfig
 	err := s.pool.QueryRow(ctx, `
-		SELECT name, provider_type, api_key, base_url, max_tokens, default_model, favourite_models
+		SELECT name, provider_type, api_key, base_url, region, max_tokens, default_model, favourite_models
 		FROM llm_providers WHERE name = $1
-	`, name).Scan(&p.Name, &p.ProviderType, &p.APIKey, &p.BaseURL, &p.MaxTokens, &p.DefaultModel, &p.FavouriteModels)
+	`, name).Scan(&p.Name, &p.ProviderType, &p.APIKey, &p.BaseURL, &p.Region, &p.MaxTokens, &p.DefaultModel, &p.FavouriteModels)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -77,16 +77,17 @@ func (s *Store) UpsertLLMProvider(ctx context.Context, p LLMConfig) error {
 		favourites = []string{}
 	}
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO llm_providers (name, provider_type, api_key, base_url, max_tokens, default_model, favourite_models)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO llm_providers (name, provider_type, api_key, base_url, region, max_tokens, default_model, favourite_models)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (name) DO UPDATE SET
 			provider_type = EXCLUDED.provider_type,
 			api_key = EXCLUDED.api_key,
 			base_url = EXCLUDED.base_url,
+			region = EXCLUDED.region,
 			max_tokens = EXCLUDED.max_tokens,
 			default_model = EXCLUDED.default_model,
 			favourite_models = EXCLUDED.favourite_models
-	`, p.Name, p.ProviderType, encKey, p.BaseURL, p.MaxTokens, p.DefaultModel, favourites)
+	`, p.Name, p.ProviderType, encKey, p.BaseURL, p.Region, p.MaxTokens, p.DefaultModel, favourites)
 	if err != nil {
 		return fmt.Errorf("upserting LLM provider %q: %w", p.Name, err)
 	}

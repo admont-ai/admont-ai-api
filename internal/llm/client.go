@@ -31,6 +31,10 @@ type Client struct {
 	providers    map[string]Provider // keyed by provider type
 	registry     *ModelRegistry
 	actionLimits map[string]int64 // per-action output-token limits (0/absent = provider ceiling)
+	// usageHook, if set, is invoked after every successful call with the serving
+	// provider and the input/output token counts; used to attribute per-user,
+	// per-provider daily usage.
+	usageHook func(ctx context.Context, provider string, input, output int64)
 }
 
 // NewClient creates a Client backed by the given providers.
@@ -72,6 +76,24 @@ func (c *Client) LimitFor(action string) int64 {
 	return c.actionLimits[action]
 }
 
+// SetUsageHook registers a callback invoked after every successful LLM call with
+// the serving provider and the call's input/output token counts. Used to record
+// per-user, per-provider daily usage.
+func (c *Client) SetUsageHook(fn func(ctx context.Context, provider string, input, output int64)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.usageHook = fn
+}
+
+// recordUsage invokes the usage hook (if set) for a completed, successful call.
+// The caller must hold c.mu (read lock is sufficient), so this does not lock.
+func (c *Client) recordUsage(ctx context.Context, provider string, usage TokenUsage, err error) {
+	if err != nil || c.usageHook == nil {
+		return
+	}
+	c.usageHook(ctx, provider, usage.InputTokens, usage.OutputTokens)
+}
+
 // logUsage writes the token consumption of a completed LLM call to the log.
 func logUsage(provider, model string, usage TokenUsage, elapsed time.Duration, err error) {
 	fields := log.Fields{
@@ -101,6 +123,7 @@ func (c *Client) Do(ctx context.Context, model, systemPrompt, userPrompt string,
 			start := time.Now()
 			result, usage, err := p.Do(ctx, model, systemPrompt, userPrompt, maxTokens)
 			logUsage(p.Name(), model, usage, time.Since(start), err)
+			c.recordUsage(ctx, p.Name(), usage, err)
 			return result, usage, err
 		}
 		return "", TokenUsage{}, fmt.Errorf("no LLM providers configured")
@@ -113,6 +136,7 @@ func (c *Client) Do(ctx context.Context, model, systemPrompt, userPrompt string,
 	start := time.Now()
 	result, usage, err := p.Do(ctx, model, systemPrompt, userPrompt, maxTokens)
 	logUsage(provType, model, usage, time.Since(start), err)
+	c.recordUsage(ctx, provType, usage, err)
 	return result, usage, err
 }
 
@@ -128,6 +152,7 @@ func (c *Client) DoChat(ctx context.Context, model, systemPrompt string, message
 			start := time.Now()
 			result, usage, err := p.DoChat(ctx, model, systemPrompt, messages, maxTokens)
 			logUsage(p.Name(), model, usage, time.Since(start), err)
+			c.recordUsage(ctx, p.Name(), usage, err)
 			return result, usage, err
 		}
 		return "", TokenUsage{}, fmt.Errorf("no LLM providers configured")
@@ -140,6 +165,7 @@ func (c *Client) DoChat(ctx context.Context, model, systemPrompt string, message
 	start := time.Now()
 	result, usage, err := p.DoChat(ctx, model, systemPrompt, messages, maxTokens)
 	logUsage(provType, model, usage, time.Since(start), err)
+	c.recordUsage(ctx, provType, usage, err)
 	return result, usage, err
 }
 

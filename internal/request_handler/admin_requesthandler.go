@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +28,7 @@ import (
 	storellm "github.com/christianfischer/md-wiki-server/internal/store/llm_provider"
 	storesearch "github.com/christianfischer/md-wiki-server/internal/store/search_provider"
 	"github.com/christianfischer/md-wiki-server/internal/store/users"
+	"github.com/christianfischer/md-wiki-server/internal/usage"
 	"github.com/go-fuego/fuego"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
@@ -59,7 +61,14 @@ type AdminRequesthandler struct {
 	llmRebuild           func()
 	invalidateSessions   func(identity string)
 	passwordPolicy       config.PasswordPolicy
+	usageTracker         *usage.Tracker
 	mu                   sync.RWMutex
+}
+
+// SetUsageTracker wires the in-memory LLM token usage tracker for the admin
+// usage/reset endpoints.
+func (h *AdminRequesthandler) SetUsageTracker(t *usage.Tracker) {
+	h.usageTracker = t
 }
 
 // SetSessionInvalidator sets the callback used to revoke a user's existing
@@ -423,6 +432,10 @@ type updateInternalUserRequest struct {
 	Roles           []string `json:"roles"`
 	PasswordExpired *bool    `json:"password_expired"`
 	Suspended       *bool    `json:"suspended"`
+	// Daily LLM token caps. null = inherit the global default; 0 = unlimited.
+	// Always applied as sent (the admin UI submits the full form).
+	DailyInputTokenLimit  *int64 `json:"daily_input_token_limit"`
+	DailyOutputTokenLimit *int64 `json:"daily_output_token_limit"`
 }
 
 // GetInternalUsers returns all internal users.
@@ -574,6 +587,9 @@ func (h *AdminRequesthandler) UpdateInternalUser(c fuego.ContextWithBody[updateI
 				h.users[i].Status = suspendStatus(h.users[i].Status, *body.Suspended)
 				h.users[i].Suspended = h.users[i].Status == "suspended"
 			}
+			// Daily token caps are applied as sent (null clears to inherit-default).
+			h.users[i].DailyInputTokenLimit = body.DailyInputTokenLimit
+			h.users[i].DailyOutputTokenLimit = body.DailyOutputTokenLimit
 
 			if err := h.store.Users.UpsertInternalUser(ctx, h.users[i]); err != nil {
 				return users.UserEntry{}, fuego.InternalServerError{Detail: fmt.Sprintf("saving user: %v", err)}
@@ -668,6 +684,9 @@ type updateExternalUserRequest struct {
 	SuperAdmin *bool    `json:"super_admin"`
 	Roles      []string `json:"roles"`
 	Suspended  *bool    `json:"suspended"`
+	// Daily LLM token caps. null = inherit the global default; 0 = unlimited.
+	DailyInputTokenLimit  *int64 `json:"daily_input_token_limit"`
+	DailyOutputTokenLimit *int64 `json:"daily_output_token_limit"`
 }
 
 // suspendStatus maps a suspend toggle onto the lifecycle status: suspending
@@ -828,6 +847,9 @@ func (h *AdminRequesthandler) UpdateExternalUser(c fuego.ContextWithBody[updateE
 				h.users[i].Status = suspendStatus(h.users[i].Status, *body.Suspended)
 				h.users[i].Suspended = h.users[i].Status == "suspended"
 			}
+			// Daily token caps are applied as sent (null clears to inherit-default).
+			h.users[i].DailyInputTokenLimit = body.DailyInputTokenLimit
+			h.users[i].DailyOutputTokenLimit = body.DailyOutputTokenLimit
 
 			if err := h.store.Users.UpsertExternalUser(ctx, h.users[i]); err != nil {
 				return users.UserEntry{}, fuego.InternalServerError{Detail: fmt.Sprintf("saving user: %v", err)}
@@ -1875,6 +1897,7 @@ type llmProviderResponse struct {
 	ProviderType    string   `json:"provider_type"`
 	APIKey          string   `json:"api_key"`
 	BaseURL         string   `json:"base_url,omitempty"`
+	Region          string   `json:"region,omitempty"`
 	MaxTokens       int64    `json:"max_tokens"`
 	DefaultModel    string   `json:"default_model"`
 	FavouriteModels []string `json:"favourite_models"`
@@ -1885,6 +1908,7 @@ type addLLMProviderRequest struct {
 	ProviderType    string   `json:"provider_type" validate:"required"`
 	APIKey          string   `json:"api_key"`
 	BaseURL         string   `json:"base_url"`
+	Region          string   `json:"region"`
 	MaxTokens       int64    `json:"max_tokens"`
 	DefaultModel    string   `json:"default_model"`
 	FavouriteModels []string `json:"favourite_models"`
@@ -1894,6 +1918,7 @@ type updateLLMProviderRequest struct {
 	ProviderType    string   `json:"provider_type"`
 	APIKey          string   `json:"api_key"`
 	BaseURL         string   `json:"base_url"`
+	Region          string   `json:"region"`
 	MaxTokens       int64    `json:"max_tokens"`
 	DefaultModel    string   `json:"default_model"`
 	FavouriteModels []string `json:"favourite_models"`
@@ -1934,6 +1959,7 @@ func (h *AdminRequesthandler) GetSupportedLLMProviders(c fuego.ContextNoBody) ([
 	}
 	providers := []providerDef{
 		{"anthropic", "api_key"},
+		{"bedrock", "region"},
 		{"deepseek", "api_key"},
 		{"google", "api_key"},
 		{"meta", "api_key"},
@@ -1972,6 +1998,7 @@ func (h *AdminRequesthandler) GetLLMProviders(c fuego.ContextNoBody) ([]llmProvi
 			ProviderType:    p.ProviderType,
 			APIKey:          obfuscateAPIKey(p.APIKey),
 			BaseURL:         p.BaseURL,
+			Region:          p.Region,
 			MaxTokens:       p.MaxTokens,
 			DefaultModel:    p.DefaultModel,
 			FavouriteModels: p.FavouriteModels,
@@ -2035,6 +2062,135 @@ func (h *AdminRequesthandler) SetLLMTokenLimits(c fuego.ContextWithBody[llmToken
 	return body, nil
 }
 
+// --- Per-user daily token limits & usage ---
+
+// defaultDailyLimits returns the global default daily token caps (0 = unlimited).
+func (h *AdminRequesthandler) defaultDailyLimits(ctx context.Context) usage.DailyLimits {
+	var d usage.DailyLimits
+	raw, err := h.store.GetSetting(ctx, usage.DefaultLimitSettingKey)
+	if err == nil && raw != "" {
+		if err := json.Unmarshal([]byte(raw), &d); err != nil {
+			log.WithError(err).Warn("invalid daily_token_limit_default setting")
+		}
+	}
+	return d
+}
+
+// GetDailyTokenLimits returns the global default per-user daily token caps.
+func (h *AdminRequesthandler) GetDailyTokenLimits(c fuego.ContextNoBody) (usage.DailyLimits, error) {
+	return h.defaultDailyLimits(context.Background()), nil
+}
+
+// SetDailyTokenLimits stores the global default per-user daily token caps.
+func (h *AdminRequesthandler) SetDailyTokenLimits(c fuego.ContextWithBody[usage.DailyLimits]) (usage.DailyLimits, error) {
+	body, err := c.Body()
+	if err != nil {
+		return usage.DailyLimits{}, fuego.BadRequestError{Detail: "invalid request body"}
+	}
+	if body.Input < 0 || body.Output < 0 {
+		return usage.DailyLimits{}, fuego.BadRequestError{Detail: "token limits must not be negative"}
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		return usage.DailyLimits{}, fuego.InternalServerError{Detail: "encoding token limits"}
+	}
+	if err := h.store.SetSetting(context.Background(), usage.DefaultLimitSettingKey, string(data)); err != nil {
+		return usage.DailyLimits{}, fuego.InternalServerError{Detail: fmt.Sprintf("saving token limits: %v", err)}
+	}
+	log.WithFields(log.Fields{"input": body.Input, "output": body.Output}).Info("default daily token limits updated via admin API")
+	return body, nil
+}
+
+// providerUsage is one provider's contribution to an identity's daily usage.
+type providerUsage struct {
+	Provider   string `json:"provider"`
+	InputUsed  int64  `json:"input_used"`
+	OutputUsed int64  `json:"output_used"`
+}
+
+// llmUsageRow is one user's current daily usage (combined across providers) and
+// effective caps (0 = unlimited), with a per-provider breakdown.
+type llmUsageRow struct {
+	Identity    string          `json:"identity"`
+	Email       string          `json:"email,omitempty"`
+	InputUsed   int64           `json:"input_used"`
+	OutputUsed  int64           `json:"output_used"`
+	InputLimit  int64           `json:"input_limit"`
+	OutputLimit int64           `json:"output_limit"`
+	Providers   []providerUsage `json:"providers"`
+}
+
+// GetLLMUsage returns the current in-memory daily token usage for every tracked
+// user (or client IP for unauthenticated callers), with effective caps.
+func (h *AdminRequesthandler) GetLLMUsage(c fuego.ContextNoBody) ([]llmUsageRow, error) {
+	if h.usageTracker == nil {
+		return []llmUsageRow{}, nil
+	}
+	ctx := context.Background()
+	def := h.defaultDailyLimits(ctx)
+	snap := h.usageTracker.Snapshot()
+
+	rows := make([]llmUsageRow, 0, len(snap))
+	for key, byProvider := range snap {
+		row := llmUsageRow{
+			Identity:    key,
+			InputLimit:  def.Input,
+			OutputLimit: def.Output,
+		}
+		for provider, u := range byProvider {
+			row.InputUsed += u.Input
+			row.OutputUsed += u.Output
+			row.Providers = append(row.Providers, providerUsage{
+				Provider:   provider,
+				InputUsed:  u.Input,
+				OutputUsed: u.Output,
+			})
+		}
+		sort.Slice(row.Providers, func(i, j int) bool { return row.Providers[i].Provider < row.Providers[j].Provider })
+		// key is "authProvider:email" — resolve the user for email + per-user caps.
+		if provider, email, ok := strings.Cut(key, ":"); ok {
+			if ue, err := h.store.Users.GetUser(ctx, provider, email); err == nil && ue != nil {
+				row.Email = ue.Email
+				if ue.DailyInputTokenLimit != nil {
+					row.InputLimit = *ue.DailyInputTokenLimit
+				}
+				if ue.DailyOutputTokenLimit != nil {
+					row.OutputLimit = *ue.DailyOutputTokenLimit
+				}
+			}
+		}
+		rows = append(rows, row)
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Identity < rows[j].Identity })
+	return rows, nil
+}
+
+type resetUsageRequest struct {
+	Identity string `json:"identity" validate:"required"`
+}
+
+// ResetLLMUsage clears the current daily usage for a single identity.
+func (h *AdminRequesthandler) ResetLLMUsage(c fuego.ContextWithBody[resetUsageRequest]) (messageResponse, error) {
+	body, err := c.Body()
+	if err != nil || body.Identity == "" {
+		return messageResponse{}, fuego.BadRequestError{Detail: "identity is required"}
+	}
+	if h.usageTracker != nil {
+		h.usageTracker.Reset(body.Identity)
+	}
+	log.WithField("identity", body.Identity).Info("LLM token usage reset for user via admin API")
+	return messageResponse{Message: fmt.Sprintf("usage reset for %q", body.Identity)}, nil
+}
+
+// ResetAllLLMUsage clears the current daily usage for every tracked identity.
+func (h *AdminRequesthandler) ResetAllLLMUsage(c fuego.ContextNoBody) (messageResponse, error) {
+	if h.usageTracker != nil {
+		h.usageTracker.ResetAll()
+	}
+	log.Info("all LLM token usage reset via admin API")
+	return messageResponse{Message: "all usage reset"}, nil
+}
+
 // GetLLMProviderModels returns the full (filtered) model list of a configured
 // provider, fetched live from the provider API. Used by the admin UI to let
 // the admin pick favourite models.
@@ -2073,12 +2229,16 @@ func (h *AdminRequesthandler) AddLLMProvider(c fuego.ContextWithBody[addLLMProvi
 	if body.ProviderType == "" {
 		return llmProviderResponse{}, fuego.BadRequestError{Detail: "provider_type is required"}
 	}
+	if body.ProviderType == "bedrock" && strings.TrimSpace(body.Region) == "" {
+		return llmProviderResponse{}, fuego.BadRequestError{Detail: "region is required for bedrock"}
+	}
 
 	p := storellm.LLMConfig{
 		Name:            body.Name,
 		ProviderType:    body.ProviderType,
 		APIKey:          body.APIKey,
 		BaseURL:         body.BaseURL,
+		Region:          body.Region,
 		MaxTokens:       body.MaxTokens,
 		DefaultModel:    body.DefaultModel,
 		FavouriteModels: body.FavouriteModels,
@@ -2098,6 +2258,7 @@ func (h *AdminRequesthandler) AddLLMProvider(c fuego.ContextWithBody[addLLMProvi
 		ProviderType:    p.ProviderType,
 		APIKey:          obfuscateAPIKey(p.APIKey),
 		BaseURL:         p.BaseURL,
+		Region:          p.Region,
 		MaxTokens:       p.MaxTokens,
 		DefaultModel:    p.DefaultModel,
 		FavouriteModels: p.FavouriteModels,
@@ -2133,6 +2294,12 @@ func (h *AdminRequesthandler) UpdateLLMProvider(c fuego.ContextWithBody[updateLL
 	if body.BaseURL != "" {
 		existing.BaseURL = body.BaseURL
 	}
+	if body.Region != "" {
+		existing.Region = body.Region
+	}
+	if existing.ProviderType == "bedrock" && strings.TrimSpace(existing.Region) == "" {
+		return llmProviderResponse{}, fuego.BadRequestError{Detail: "region is required for bedrock"}
+	}
 	if body.MaxTokens != 0 {
 		existing.MaxTokens = body.MaxTokens
 	}
@@ -2157,6 +2324,7 @@ func (h *AdminRequesthandler) UpdateLLMProvider(c fuego.ContextWithBody[updateLL
 		ProviderType:    existing.ProviderType,
 		APIKey:          obfuscateAPIKey(existing.APIKey),
 		BaseURL:         existing.BaseURL,
+		Region:          existing.Region,
 		MaxTokens:       existing.MaxTokens,
 		DefaultModel:    existing.DefaultModel,
 		FavouriteModels: existing.FavouriteModels,
