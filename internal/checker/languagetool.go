@@ -19,7 +19,9 @@ func NewLanguageToolChecker(baseURL string) *LanguageToolChecker {
 	return &LanguageToolChecker{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		httpClient: &http.Client{
-			Timeout: 5 * time.Second,
+			// LanguageTool's JVM warmup makes the first few checks after
+			// startup much slower than steady-state (tens of seconds).
+			Timeout: 30 * time.Second,
 		},
 	}
 }
