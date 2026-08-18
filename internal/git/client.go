@@ -269,6 +269,12 @@ func (c *Client) HasStagedChanges() bool {
 func (c *Client) Commit(message string, authorName string, authorEmail string) error {
 	cmd := exec.Command("git", "-C", c.repoPath, "commit", "-m", message,
 		"--author", fmt.Sprintf("%s <%s>", authorName, authorEmail))
+	// git requires a committer identity separate from --author; set it
+	// explicitly so commits work regardless of container/global git config.
+	cmd.Env = append(os.Environ(),
+		"GIT_COMMITTER_NAME="+authorName,
+		"GIT_COMMITTER_EMAIL="+authorEmail,
+	)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git commit: %s: %w", strings.TrimSpace(string(out)), err)
 	}
