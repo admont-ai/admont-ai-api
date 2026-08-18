@@ -28,7 +28,7 @@ func NewCheckerRequesthandler(c checker.Checker) *CheckerRequesthandler {
 
 func (h *CheckerRequesthandler) Check(c fuego.ContextWithBody[checkerRequest]) (checkerResponse, error) {
 	if h.checker == nil {
-		return checkerResponse{}, fuego.HTTPError{Status: http.StatusServiceUnavailable, Detail: "Checker not configured"}
+		return checkerResponse{Annotations: []checker.Annotation{}}, nil
 	}
 
 	body, err := c.Body()
