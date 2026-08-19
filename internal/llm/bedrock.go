@@ -20,7 +20,6 @@ type bedrockRuntimeClient interface {
 
 // bedrockControlClient is the subset of the control-plane client used to list models.
 type bedrockControlClient interface {
-	ListFoundationModels(context.Context, *bedrock.ListFoundationModelsInput, ...func(*bedrock.Options)) (*bedrock.ListFoundationModelsOutput, error)
 	ListInferenceProfiles(context.Context, *bedrock.ListInferenceProfilesInput, ...func(*bedrock.Options)) (*bedrock.ListInferenceProfilesOutput, error)
 }
 
@@ -127,15 +126,10 @@ func bedrockText(blocks []runtimetypes.ContentBlock) string {
 	return text.String()
 }
 
-// FetchModels lists active text foundation models and active inference profiles
-// that can be passed directly to Converse as a model ID or ARN.
+// FetchModels lists active inference profiles that can be passed directly to
+// Converse as a model ARN.
 func (p *BedrockProvider) FetchModels(ctx context.Context) ([]Model, error) {
-	foundation, err := p.control.ListFoundationModels(ctx, &bedrock.ListFoundationModelsInput{})
-	if err != nil {
-		return nil, fmt.Errorf("listing Bedrock foundation models: %w", err)
-	}
-	models := bedrockFoundationModels(foundation.ModelSummaries)
-
+	var models []Model
 	var nextToken *string
 	for {
 		profiles, err := p.control.ListInferenceProfiles(ctx, &bedrock.ListInferenceProfilesInput{NextToken: nextToken})
@@ -151,33 +145,6 @@ func (p *BedrockProvider) FetchModels(ctx context.Context) ([]Model, error) {
 	return models, nil
 }
 
-func bedrockFoundationModels(summaries []bedrocktypes.FoundationModelSummary) []Model {
-	models := make([]Model, 0, len(summaries))
-	for _, summary := range summaries {
-		if summary.ModelLifecycle != nil && summary.ModelLifecycle.Status != bedrocktypes.FoundationModelLifecycleStatusActive {
-			continue
-		}
-		if !hasBedrockTextOutput(summary.OutputModalities) || aws.ToString(summary.ModelId) == "" {
-			continue
-		}
-		name := aws.ToString(summary.ModelName)
-		if provider := aws.ToString(summary.ProviderName); provider != "" {
-			name = provider + ": " + name
-		}
-		models = append(models, Model{ID: aws.ToString(summary.ModelId), Name: name})
-	}
-	return models
-}
-
-func hasBedrockTextOutput(modalities []bedrocktypes.ModelModality) bool {
-	for _, modality := range modalities {
-		if modality == bedrocktypes.ModelModalityText {
-			return true
-		}
-	}
-	return false
-}
-
 func bedrockInferenceProfiles(summaries []bedrocktypes.InferenceProfileSummary) []Model {
 	models := make([]Model, 0, len(summaries))
 	for _, summary := range summaries {
@@ -188,7 +155,7 @@ func bedrockInferenceProfiles(summaries []bedrocktypes.InferenceProfileSummary) 
 		if name == "" {
 			name = aws.ToString(summary.InferenceProfileId)
 		}
-		models = append(models, Model{ID: aws.ToString(summary.InferenceProfileArn), Name: "Inference profile: " + name})
+		models = append(models, Model{ID: aws.ToString(summary.InferenceProfileArn), Name: name})
 	}
 	return models
 }

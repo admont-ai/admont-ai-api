@@ -64,19 +64,12 @@ func TestBedrockProviderRequiresModel(t *testing.T) {
 	require.ErrorContains(t, err, "default_model")
 }
 
-func TestBedrockCatalogFiltersAndIncludesProfiles(t *testing.T) {
-	foundation := bedrockFoundationModels([]bedrocktypes.FoundationModelSummary{
-		{ModelId: aws.String("active-text"), ModelName: aws.String("Text model"), ProviderName: aws.String("Amazon"), OutputModalities: []bedrocktypes.ModelModality{bedrocktypes.ModelModalityText}, ModelLifecycle: &bedrocktypes.FoundationModelLifecycle{Status: bedrocktypes.FoundationModelLifecycleStatusActive}},
-		{ModelId: aws.String("legacy"), OutputModalities: []bedrocktypes.ModelModality{bedrocktypes.ModelModalityText}, ModelLifecycle: &bedrocktypes.FoundationModelLifecycle{Status: bedrocktypes.FoundationModelLifecycleStatusLegacy}},
-		{ModelId: aws.String("embedding"), OutputModalities: []bedrocktypes.ModelModality{bedrocktypes.ModelModalityEmbedding}},
-	})
-	assert.Equal(t, []Model{{ID: "active-text", Name: "Amazon: Text model"}}, foundation)
-
+func TestBedrockCatalogFiltersInferenceProfiles(t *testing.T) {
 	profiles := bedrockInferenceProfiles([]bedrocktypes.InferenceProfileSummary{
 		{InferenceProfileArn: aws.String("arn:aws:bedrock:profile/active"), InferenceProfileName: aws.String("US Model"), Status: bedrocktypes.InferenceProfileStatusActive},
 		{InferenceProfileArn: aws.String("arn:aws:bedrock:profile/inactive")},
 	})
-	assert.Equal(t, []Model{{ID: "arn:aws:bedrock:profile/active", Name: "Inference profile: US Model"}}, profiles)
+	assert.Equal(t, []Model{{ID: "arn:aws:bedrock:profile/active", Name: "US Model"}}, profiles)
 }
 
 var _ bedrockControlClient = (*bedrock.Client)(nil)
