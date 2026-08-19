@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"time"
 
@@ -198,6 +199,7 @@ func (r *ModelRegistry) fetchProvider(ctx context.Context, name string, fetcher 
 		log.WithError(err).WithField("provider", name).Warn("failed to fetch models dynamically")
 		return
 	}
+	sort.Slice(models, func(i, j int) bool { return models[i].Name < models[j].Name })
 	r.mu.Lock()
 	r.dynamicModels[name] = models
 	r.mu.Unlock()

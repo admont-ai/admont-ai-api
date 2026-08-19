@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type mockFetcher struct {
@@ -160,4 +161,17 @@ func TestModelRegistry_FetchProvider(t *testing.T) {
 
 	// Unknown provider returns whatever is cached (nothing).
 	assert.Empty(t, r.FetchProvider(context.Background(), "unknown"))
+}
+
+func TestModelRegistry_ModelsSortedAlphabetically(t *testing.T) {
+	r := NewModelRegistry()
+	setDynamic(r, "openai", []Model{
+		{ID: "o3", Name: "o3"},
+		{ID: "gpt-4", Name: "GPT-4"},
+		{ID: "gpt-5", Name: "GPT-5"},
+	})
+
+	models := r.Models("openai")
+	require.Len(t, models, 3)
+	assert.Equal(t, []string{"GPT-4", "GPT-5", "o3"}, []string{models[0].Name, models[1].Name, models[2].Name})
 }
