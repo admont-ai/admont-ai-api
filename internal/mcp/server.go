@@ -53,8 +53,10 @@ func getUserIdentity(ctx context.Context) string {
 
 // Server wraps the MCP protocol server and integrates with the wiki backend.
 type Server struct {
-	mcpServer *mcpserver.MCPServer
-	sseServer *mcpserver.SSEServer
+	mcpServer                *mcpserver.MCPServer
+	sseServer                *mcpserver.SSEServer
+	streamableServer         *mcpserver.StreamableHTTPServer
+	protectedResourceHandler http.Handler
 
 	backends      map[string]repo.RepoBackend
 	draftManagers map[string]*draft.Manager
@@ -154,6 +156,24 @@ func NewServer(
 		mcpserver.WithSSEContextFunc(s.contextFromRequest),
 	)
 
+	// Streamable HTTP transport (mounted at /mcp), alongside the SSE
+	// transport above for backward compatibility with existing clients.
+	// Stateless: SSE session tracking already lives outside the library in
+	// s.mcpSessions, so a second, library-managed session store would just
+	// duplicate that without persisting anything either (persistence is
+	// explicitly out of scope).
+	s.streamableServer = mcpserver.NewStreamableHTTPServer(s.mcpServer,
+		mcpserver.WithEndpointPath("/mcp"),
+		mcpserver.WithHTTPContextFunc(s.contextFromRequest),
+		mcpserver.WithStateLess(true),
+	)
+
+	s.protectedResourceHandler = mcpserver.NewProtectedResourceMetadataHandler(mcpserver.ProtectedResourceMetadataConfig{
+		Resource:               s.baseURL,
+		AuthorizationServers:   []string{s.baseURL},
+		BearerMethodsSupported: []string{"header"},
+	})
+
 	go s.cleanupLoop()
 
 	return s
@@ -182,7 +202,7 @@ func (s *Server) SetSearch(b *backend.Holder, rs backend.RepoStateStore) {
 func (s *Server) RegisterRoutes(r *gin.Engine) {
 	// OAuth discovery metadata
 	r.GET("/.well-known/oauth-authorization-server", s.oauthMetadata)
-	r.GET("/.well-known/oauth-protected-resource", s.protectedResourceMetadata)
+	r.GET("/.well-known/oauth-protected-resource", gin.WrapH(s.protectedResourceHandler))
 
 	mcp := r.Group("/mcp")
 	// OAuth endpoints
@@ -194,6 +214,9 @@ func (s *Server) RegisterRoutes(r *gin.Engine) {
 	// SSE transport (auth required — returns 401 to trigger MCP OAuth flow)
 	mcp.GET("/sse", s.requireAuth, gin.WrapF(s.sseServer.ServeHTTP))
 	mcp.POST("/message", s.requireAuthMessage, gin.WrapF(s.sseServer.ServeHTTP))
+	// Streamable HTTP transport (GET/POST/DELETE all on the same path).
+	mcp.Any("/", s.requireAuth, gin.WrapF(s.streamableServer.ServeHTTP))
+	mcp.Any("", s.requireAuth, gin.WrapF(s.streamableServer.ServeHTTP))
 }
 
 // bearerToken extracts the JWT from the Authorization header or access_token query param.
@@ -265,14 +288,6 @@ func (s *Server) sendUnauthorized(c *gin.Context) {
 		s.baseURL,
 	))
 	c.AbortWithStatus(http.StatusUnauthorized)
-}
-
-func (s *Server) protectedResourceMetadata(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
-		"resource":                 s.baseURL,
-		"authorization_servers":    []string{s.baseURL},
-		"bearer_methods_supported": []string{"header"},
-	})
 }
 
 // contextFromRequest validates the JWT from the SSE connection and injects user info.
