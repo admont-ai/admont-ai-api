@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -21,6 +20,7 @@ import (
 	"github.com/christianfischer/md-wiki-server/internal/pg_vector/backend"
 	"github.com/christianfischer/md-wiki-server/internal/pg_vector/indexer"
 	"github.com/christianfischer/md-wiki-server/internal/repo"
+	"github.com/christianfischer/md-wiki-server/internal/repoactions"
 	"github.com/christianfischer/md-wiki-server/internal/store/git_repo"
 	"github.com/gin-gonic/gin"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
@@ -659,33 +659,22 @@ func (s *Server) isReadOnly(repoSlug string) bool {
 	return ok && rc.ReadOnly
 }
 
+// actionDeps builds the repoactions.Deps for one repo/identity pair.
+func (s *Server) actionDeps(repoSlug, identity string) repoactions.Deps {
+	return repoactions.Deps{
+		Backend:         s.backends[repoSlug],
+		RepoSlug:        repoSlug,
+		Resolver:        s.permResolvers[repoSlug],
+		ReadOnly:        s.isReadOnly(repoSlug),
+		IsAdmin:         identity != "" && s.isSystemAdmin != nil && s.isSystemAdmin(identity),
+		Indexer:         s.idx,
+		ShouldIndex:     s.shouldIndex(repoSlug),
+		SavePermissions: func() { s.savePermissions(repoSlug) },
+	}
+}
+
 func (s *Server) checkPermission(repoSlug, identity, path string, required permissions.Level) error {
-	if s.isReadOnly(repoSlug) && required > permissions.Viewer {
-		return fmt.Errorf("not found")
-	}
-	if identity != "" && s.isSystemAdmin != nil && s.isSystemAdmin(identity) {
-		return nil
-	}
-	if isDotPath(path) {
-		return fmt.Errorf("not found")
-	}
-	resolver := s.permResolvers[repoSlug]
-	if resolver == nil {
-		if identity == "" && required <= permissions.Viewer {
-			return nil
-		}
-		if identity == "" {
-			return fmt.Errorf("authentication required")
-		}
-		return fmt.Errorf("not found")
-	}
-	if !resolver.Check(identity, path, required) {
-		if identity == "" {
-			return fmt.Errorf("authentication required")
-		}
-		return fmt.Errorf("not found")
-	}
-	return nil
+	return repoactions.CheckPermission(s.actionDeps(repoSlug, identity), identity, path, required)
 }
 
 func (s *Server) canAccessRepo(repoSlug, identity string) bool {
@@ -765,23 +754,9 @@ func (s *Server) savePermissions(repoSlug string) {
 	}
 }
 
-func isDotPath(filePath string) bool {
-	for _, part := range strings.Split(filePath, "/") {
-		if strings.HasPrefix(part, ".") {
-			return true
-		}
-	}
-	return false
-}
+func isDotPath(filePath string) bool { return repoactions.IsDotPath(filePath) }
 
-func splitPath(filePath string) (subfolder, filename string) {
-	subfolder = filepath.Dir(filePath)
-	if subfolder == "." {
-		subfolder = ""
-	}
-	filename = filepath.Base(filePath)
-	return
-}
+func splitPath(filePath string) (subfolder, filename string) { return repoactions.SplitPath(filePath) }
 
 func jsonResult(v any) *mcplib.CallToolResult {
 	data, err := json.Marshal(v)

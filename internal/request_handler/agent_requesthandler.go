@@ -16,6 +16,7 @@ import (
 	"github.com/christianfischer/md-wiki-server/internal/pg_vector/backend"
 	"github.com/christianfischer/md-wiki-server/internal/pg_vector/indexer"
 	"github.com/christianfischer/md-wiki-server/internal/repo"
+	"github.com/christianfischer/md-wiki-server/internal/repoactions"
 	"github.com/christianfischer/md-wiki-server/internal/store/ai_conversation"
 	"github.com/christianfischer/md-wiki-server/internal/store/git_repo"
 	"github.com/gin-gonic/gin"
@@ -24,10 +25,10 @@ import (
 )
 
 const (
-	maxAgentIterations  = 12
-	maxToolResultChars  = 8_000
-	maxListEntries      = 500
-	agentSearchTopK     = 8
+	maxAgentIterations = 12
+	maxToolResultChars = 8_000
+	maxListEntries     = 500
+	agentSearchTopK    = 8
 )
 
 type agentRequest struct {
@@ -54,8 +55,8 @@ type agentResponse struct {
 // agentDirective is one turn of the JSON protocol: either a tool invocation
 // or the final answer.
 type agentDirective struct {
-	Tool   string `json:"tool"`
-	Args   struct {
+	Tool string `json:"tool"`
+	Args struct {
 		Path    string `json:"path"`
 		Content string `json:"content"`
 		Query   string `json:"query"`
@@ -357,22 +358,23 @@ func (h *AgentRequesthandler) validatePath(repoSlug, p string) (string, error) {
 	return clean, nil
 }
 
+// actionDeps builds the repoactions.Deps for one repo/identity pair.
+func (h *AgentRequesthandler) actionDeps(repoSlug, identity string) repoactions.Deps {
+	rc, ok := h.repoConfigs[repoSlug]
+	return repoactions.Deps{
+		Backend:     h.backends[repoSlug],
+		RepoSlug:    repoSlug,
+		Resolver:    h.permResolvers[repoSlug],
+		ReadOnly:    ok && rc.ReadOnly,
+		IsAdmin:     identity != "" && h.isSystemAdmin != nil && h.isSystemAdmin(identity),
+		Indexer:     h.indexer,
+		ShouldIndex: h.shouldIndex(repoSlug),
+	}
+}
+
 // checkPerm enforces repo read-only state and per-path permission levels.
 func (h *AgentRequesthandler) checkPerm(repoSlug, identity, p string, required permissions.Level) error {
-	if rc, ok := h.repoConfigs[repoSlug]; ok && rc.ReadOnly && required > permissions.Viewer {
-		return errors.New("repository is read-only")
-	}
-	if identity != "" && h.isSystemAdmin != nil && h.isSystemAdmin(identity) {
-		return nil
-	}
-	resolver := h.permResolvers[repoSlug]
-	if resolver == nil {
-		return errors.New("permission denied")
-	}
-	if !resolver.Check(identity, p, required) {
-		return errors.New("permission denied")
-	}
-	return nil
+	return repoactions.CheckPermSimple(h.actionDeps(repoSlug, identity), identity, p, required)
 }
 
 func (h *AgentRequesthandler) shouldIndex(repoSlug string) bool {
@@ -485,29 +487,26 @@ func (h *AgentRequesthandler) toolWriteFile(repoSlug, identity, userName, p, con
 		return "error: file does not exist — use create_file"
 	}
 
-	if err := backend.AddFile(subfolder, filename, []byte(content)); err != nil {
-		return "error: writing file: " + err.Error()
-	}
-
 	verb := "update"
 	if create {
 		verb = "create"
 	}
-	backend.SaveChangesAsync(fmt.Sprintf("AI: %s %s", verb, clean), userName, identity)
-	if h.shouldIndex(repoSlug) {
-		h.indexer.IndexFile(repoSlug, clean)
+	commitMessage := fmt.Sprintf("AI: %s %s", verb, clean)
+	deps := h.actionDeps(repoSlug, identity)
+	var writeErr error
+	if create {
+		writeErr = repoactions.CreateFile(deps, subfolder, filename, clean, []byte(content), commitMessage, userName, identity)
+	} else {
+		writeErr = repoactions.UpdateFile(deps, subfolder, filename, clean, []byte(content), commitMessage, userName, identity)
+	}
+	if writeErr != nil {
+		return "error: writing file: " + writeErr.Error()
 	}
 	return fmt.Sprintf("%sd %s (%d bytes)", verb, clean, len(content))
 }
 
 // splitPath splits a repo-relative path into (subfolder, filename).
-func splitPath(p string) (string, string) {
-	subfolder := filepath.Dir(p)
-	if subfolder == "." {
-		subfolder = ""
-	}
-	return subfolder, filepath.Base(p)
-}
+func splitPath(p string) (string, string) { return repoactions.SplitPath(p) }
 
 func truncateResult(s string) string {
 	if len(s) <= maxToolResultChars {

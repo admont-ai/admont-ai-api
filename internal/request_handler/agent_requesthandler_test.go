@@ -3,6 +3,10 @@ package requesthandler
 import (
 	"testing"
 
+	"github.com/christianfischer/md-wiki-server/internal/permissions"
+	"github.com/christianfischer/md-wiki-server/internal/repo"
+	"github.com/christianfischer/md-wiki-server/internal/repo/repotest"
+	"github.com/christianfischer/md-wiki-server/internal/store/git_repo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -97,4 +101,70 @@ func TestFormatChanges(t *testing.T) {
 	})
 	assert.Contains(t, out, "Created `docs/a.md`")
 	assert.Contains(t, out, "Updated `docs/b.md`")
+}
+
+// --- toolWriteFile / checkPerm regression checks (repoactions migration) ---
+// These lock in that the agent's commit-message convention ("AI: create/update
+// <path>") and its own response strings survived the repoactions refactor.
+
+func agentHandlerWithBackend(backend *repotest.FakeBackend, resolver *permissions.Resolver, readOnly bool) *AgentRequesthandler {
+	permResolvers := map[string]*permissions.Resolver{}
+	if resolver != nil {
+		permResolvers["wiki"] = resolver
+	}
+	return &AgentRequesthandler{
+		backends:      map[string]repo.RepoBackend{"wiki": backend},
+		repoConfigs:   map[string]*git_repo.GitRepo{"wiki": {Name: "Wiki", ReadOnly: readOnly}},
+		permResolvers: permResolvers,
+		docPaths:      map[string]string{},
+	}
+}
+
+func TestToolWriteFile_CreateUsesAIPrefixedCommitMessage(t *testing.T) {
+	backend := repotest.NewFakeBackend()
+	resolver := permissions.NewResolver(permissions.PermissionsFile{
+		Root:  &permissions.PathEntry{Default: permissions.ContentManager},
+		Paths: map[string]permissions.PathEntry{},
+	})
+	h := agentHandlerWithBackend(backend, resolver, false)
+
+	result := h.toolWriteFile("wiki", "alice@example.com", "Alice", "docs/page.md", "hello", true)
+	assert.Equal(t, "created docs/page.md (5 bytes)", result)
+	require.Len(t, backend.SaveCalls, 1)
+	assert.Equal(t, "AI: create docs/page.md", backend.SaveCalls[0].Message)
+	// authorName/authorEmail args are (userName, identity) — matches the
+	// original inline call exactly, even though "identity" here is an email.
+	assert.Equal(t, "Alice", backend.SaveCalls[0].AuthorName)
+	assert.Equal(t, "alice@example.com", backend.SaveCalls[0].AuthorEmail)
+
+	content, err := backend.GetFile("docs", "page.md")
+	require.NoError(t, err)
+	assert.Equal(t, "hello", string(content))
+}
+
+func TestToolWriteFile_UpdateUsesAIPrefixedCommitMessage(t *testing.T) {
+	backend := repotest.NewFakeBackend().Seed("docs/page.md", []byte("old"))
+	resolver := permissions.NewResolver(permissions.PermissionsFile{
+		Root:  &permissions.PathEntry{Default: permissions.ContentManager},
+		Paths: map[string]permissions.PathEntry{},
+	})
+	h := agentHandlerWithBackend(backend, resolver, false)
+
+	result := h.toolWriteFile("wiki", "alice@example.com", "Alice", "docs/page.md", "new content", false)
+	assert.Equal(t, "updated docs/page.md (11 bytes)", result)
+	assert.Equal(t, "AI: update docs/page.md", backend.SaveCalls[0].Message)
+}
+
+func TestCheckPerm_ReadOnlyMessage(t *testing.T) {
+	h := agentHandlerWithBackend(repotest.NewFakeBackend(), nil, true)
+	err := h.checkPerm("wiki", "alice@example.com", "docs/page.md", permissions.Contributor)
+	require.Error(t, err)
+	assert.Equal(t, "repository is read-only", err.Error())
+}
+
+func TestCheckPerm_NilResolverDenied(t *testing.T) {
+	h := agentHandlerWithBackend(repotest.NewFakeBackend(), nil, false)
+	err := h.checkPerm("wiki", "alice@example.com", "docs/page.md", permissions.Viewer)
+	require.Error(t, err)
+	assert.Equal(t, "permission denied", err.Error())
 }

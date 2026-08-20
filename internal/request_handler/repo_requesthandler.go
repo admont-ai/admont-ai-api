@@ -20,6 +20,7 @@ import (
 	"github.com/christianfischer/md-wiki-server/internal/permissions"
 	"github.com/christianfischer/md-wiki-server/internal/pg_vector/indexer"
 	"github.com/christianfischer/md-wiki-server/internal/repo"
+	"github.com/christianfischer/md-wiki-server/internal/repoactions"
 	"github.com/christianfischer/md-wiki-server/internal/store/git_repo"
 	"github.com/christianfischer/md-wiki-server/internal/store/users"
 	"github.com/gin-gonic/gin"
@@ -299,14 +300,7 @@ func permError(err error) error {
 }
 
 // isDotPath returns true if the path contains any dotfile or dot-directory component.
-func isDotPath(filePath string) bool {
-	for _, part := range strings.Split(filePath, "/") {
-		if strings.HasPrefix(part, ".") {
-			return true
-		}
-	}
-	return false
-}
+func isDotPath(filePath string) bool { return repoactions.IsDotPath(filePath) }
 
 // DocPath returns the configured doc_path for a repo, or "" if not set.
 func (h *RepoRequesthandler) DocPath(repoSlug string) string {

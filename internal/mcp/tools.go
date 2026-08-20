@@ -10,6 +10,7 @@ import (
 	"github.com/christianfischer/md-wiki-server/internal/draft"
 	"github.com/christianfischer/md-wiki-server/internal/permissions"
 	"github.com/christianfischer/md-wiki-server/internal/pg_vector/backend"
+	"github.com/christianfischer/md-wiki-server/internal/repoactions"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	log "github.com/sirupsen/logrus"
@@ -427,8 +428,7 @@ func (s *Server) createFile(ctx context.Context, req mcplib.CallToolRequest) (*m
 	if !s.canAccessRepo(repo, identity) {
 		return mcplib.NewToolResultError("repository not found"), nil
 	}
-	backend, ok := s.backends[repo]
-	if !ok {
+	if _, ok := s.backends[repo]; !ok {
 		return mcplib.NewToolResultError("repository not found"), nil
 	}
 	subfolder, filename := splitPath(path)
@@ -439,12 +439,8 @@ func (s *Server) createFile(ctx context.Context, req mcplib.CallToolRequest) (*m
 	if err := s.checkPermission(repo, identity, parentFolder+"/", permissions.Contributor); err != nil {
 		return mcplib.NewToolResultError("not found"), nil
 	}
-	if err := backend.AddFile(subfolder, filename, []byte(content)); err != nil {
+	if err := repoactions.CreateFile(s.actionDeps(repo, identity), subfolder, filename, path, []byte(content), "create "+path, name, email); err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("failed to create file: %v", err)), nil
-	}
-	backend.SaveChangesAsync("create "+path, name, email)
-	if s.shouldIndex(repo) {
-		s.idx.IndexFile(repo, path)
 	}
 	return jsonResult(map[string]any{"name": filename, "path": path}), nil
 }
@@ -462,20 +458,15 @@ func (s *Server) updateFile(ctx context.Context, req mcplib.CallToolRequest) (*m
 	if !s.canAccessRepo(repo, identity) {
 		return mcplib.NewToolResultError("repository not found"), nil
 	}
-	backend, ok := s.backends[repo]
-	if !ok {
+	if _, ok := s.backends[repo]; !ok {
 		return mcplib.NewToolResultError("repository not found"), nil
 	}
 	subfolder, filename := splitPath(path)
 	if err := s.checkPermission(repo, identity, path, permissions.Contributor); err != nil {
 		return mcplib.NewToolResultError("not found"), nil
 	}
-	if err := backend.AddFile(subfolder, filename, []byte(content)); err != nil {
+	if err := repoactions.UpdateFile(s.actionDeps(repo, identity), subfolder, filename, path, []byte(content), "update "+path, name, email); err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("failed to update file: %v", err)), nil
-	}
-	backend.SaveChangesAsync("update "+path, name, email)
-	if s.shouldIndex(repo) {
-		s.idx.IndexFile(repo, path)
 	}
 	return jsonResult(map[string]any{"name": filename, "path": path}), nil
 }
@@ -492,24 +483,15 @@ func (s *Server) deleteFile(ctx context.Context, req mcplib.CallToolRequest) (*m
 	if !s.canAccessRepo(repo, identity) {
 		return mcplib.NewToolResultError("repository not found"), nil
 	}
-	backend, ok := s.backends[repo]
-	if !ok {
+	if _, ok := s.backends[repo]; !ok {
 		return mcplib.NewToolResultError("repository not found"), nil
 	}
 	subfolder, filename := splitPath(path)
 	if err := s.checkPermission(repo, identity, path, permissions.ContentManager); err != nil {
 		return mcplib.NewToolResultError("not found"), nil
 	}
-	if err := backend.DeleteFile(subfolder, filename); err != nil {
+	if err := repoactions.DeleteFile(s.actionDeps(repo, identity), subfolder, filename, path, "delete "+path, name, email); err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("failed to delete file: %v", err)), nil
-	}
-	if resolver := s.permResolvers[repo]; resolver != nil {
-		resolver.RemoveEntry(path)
-		s.savePermissions(repo)
-	}
-	backend.SaveChangesAsync("delete "+path, name, email)
-	if s.shouldIndex(repo) {
-		s.idx.DeleteFileIndex(repo, path)
 	}
 	return mcplib.NewToolResultText("deleted"), nil
 }
@@ -527,8 +509,7 @@ func (s *Server) moveFile(ctx context.Context, req mcplib.CallToolRequest) (*mcp
 	if !s.canAccessRepo(repo, identity) {
 		return mcplib.NewToolResultError("repository not found"), nil
 	}
-	backend, ok := s.backends[repo]
-	if !ok {
+	if _, ok := s.backends[repo]; !ok {
 		return mcplib.NewToolResultError("repository not found"), nil
 	}
 	oldSubfolder, filename := splitPath(path)
@@ -543,17 +524,8 @@ func (s *Server) moveFile(ctx context.Context, req mcplib.CallToolRequest) (*mcp
 	if err := s.checkPermission(repo, identity, destFolder+"/", permissions.Contributor); err != nil {
 		return mcplib.NewToolResultError("not found"), nil
 	}
-	if err := backend.MoveFile(oldSubfolder, filename, dest, filename); err != nil {
+	if err := repoactions.MoveFile(s.actionDeps(repo, identity), oldSubfolder, filename, dest, filename, path, newFilePath, "move "+path+" to "+newFilePath, name, email); err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("failed to move file: %v", err)), nil
-	}
-	if resolver := s.permResolvers[repo]; resolver != nil {
-		resolver.RenamePath(path, newFilePath)
-		s.savePermissions(repo)
-	}
-	backend.SaveChangesAsync("move "+path+" to "+newFilePath, name, email)
-	if s.shouldIndex(repo) {
-		s.idx.DeleteFileIndex(repo, path)
-		s.idx.IndexFile(repo, newFilePath)
 	}
 	return jsonResult(map[string]any{"name": filename, "path": newFilePath}), nil
 }
@@ -574,8 +546,7 @@ func (s *Server) renameFile(ctx context.Context, req mcplib.CallToolRequest) (*m
 	if !s.canAccessRepo(repo, identity) {
 		return mcplib.NewToolResultError("repository not found"), nil
 	}
-	backend, ok := s.backends[repo]
-	if !ok {
+	if _, ok := s.backends[repo]; !ok {
 		return mcplib.NewToolResultError("repository not found"), nil
 	}
 	subfolder, oldName := splitPath(path)
@@ -583,17 +554,8 @@ func (s *Server) renameFile(ctx context.Context, req mcplib.CallToolRequest) (*m
 	if err := s.checkPermission(repo, identity, path, permissions.Contributor); err != nil {
 		return mcplib.NewToolResultError("not found"), nil
 	}
-	if err := backend.MoveFile(subfolder, oldName, subfolder, newName); err != nil {
+	if err := repoactions.MoveFile(s.actionDeps(repo, identity), subfolder, oldName, subfolder, newName, path, newFilePath, "rename "+path+" to "+newFilePath, name, email); err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("failed to rename file: %v", err)), nil
-	}
-	if resolver := s.permResolvers[repo]; resolver != nil {
-		resolver.RenamePath(path, newFilePath)
-		s.savePermissions(repo)
-	}
-	backend.SaveChangesAsync("rename "+path+" to "+newFilePath, name, email)
-	if s.shouldIndex(repo) {
-		s.idx.DeleteFileIndex(repo, path)
-		s.idx.IndexFile(repo, newFilePath)
 	}
 	return jsonResult(map[string]any{"name": newName, "path": newFilePath}), nil
 }
@@ -656,8 +618,7 @@ func (s *Server) createFolder(ctx context.Context, req mcplib.CallToolRequest) (
 	if !s.canAccessRepo(repo, identity) {
 		return mcplib.NewToolResultError("repository not found"), nil
 	}
-	backend, ok := s.backends[repo]
-	if !ok {
+	if _, ok := s.backends[repo]; !ok {
 		return mcplib.NewToolResultError("repository not found"), nil
 	}
 	subfolder := filepath.Join(path, folderName)
@@ -668,10 +629,9 @@ func (s *Server) createFolder(ctx context.Context, req mcplib.CallToolRequest) (
 	if err := s.checkPermission(repo, identity, parentFolder+"/", permissions.Contributor); err != nil {
 		return mcplib.NewToolResultError("not found"), nil
 	}
-	if err := backend.AddFile(subfolder, ".gitkeep", []byte{}); err != nil {
+	if err := repoactions.CreateFolder(s.actionDeps(repo, identity), subfolder, "create folder "+subfolder, name, email); err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("failed to create folder: %v", err)), nil
 	}
-	backend.SaveChangesAsync("create folder "+subfolder, name, email)
 	return jsonResult(map[string]any{"name": folderName, "path": subfolder}), nil
 }
 
@@ -691,8 +651,7 @@ func (s *Server) renameFolder(ctx context.Context, req mcplib.CallToolRequest) (
 	if !s.canAccessRepo(repo, identity) {
 		return mcplib.NewToolResultError("repository not found"), nil
 	}
-	backend, ok := s.backends[repo]
-	if !ok {
+	if _, ok := s.backends[repo]; !ok {
 		return mcplib.NewToolResultError("repository not found"), nil
 	}
 	parentDir := filepath.Dir(path)
@@ -703,17 +662,8 @@ func (s *Server) renameFolder(ctx context.Context, req mcplib.CallToolRequest) (
 	if err := s.checkPermission(repo, identity, path+"/", permissions.Contributor); err != nil {
 		return mcplib.NewToolResultError("not found"), nil
 	}
-	if err := backend.RenameFolder(path, newRelPath); err != nil {
+	if err := repoactions.RenameFolder(s.actionDeps(repo, identity), path, newRelPath, "rename folder "+path+" to "+newRelPath, name, email); err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("failed to rename folder: %v", err)), nil
-	}
-	if resolver := s.permResolvers[repo]; resolver != nil {
-		resolver.RenamePath(path+"/", newRelPath+"/")
-		s.savePermissions(repo)
-	}
-	backend.SaveChangesAsync("rename folder "+path+" to "+newRelPath, name, email)
-	if s.shouldIndex(repo) {
-		s.idx.DeleteFolderIndex(repo, path)
-		s.idx.ReindexFolder(repo, newRelPath)
 	}
 	return jsonResult(map[string]any{"name": newName, "path": newRelPath}), nil
 }
@@ -730,23 +680,14 @@ func (s *Server) deleteFolder(ctx context.Context, req mcplib.CallToolRequest) (
 	if !s.canAccessRepo(repo, identity) {
 		return mcplib.NewToolResultError("repository not found"), nil
 	}
-	backend, ok := s.backends[repo]
-	if !ok {
+	if _, ok := s.backends[repo]; !ok {
 		return mcplib.NewToolResultError("repository not found"), nil
 	}
 	if err := s.checkPermission(repo, identity, path+"/", permissions.ContentManager); err != nil {
 		return mcplib.NewToolResultError("not found"), nil
 	}
-	if err := backend.DeleteFolder(path); err != nil {
+	if err := repoactions.DeleteFolder(s.actionDeps(repo, identity), path, "delete folder "+path, name, email); err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("failed to delete folder: %v", err)), nil
-	}
-	if resolver := s.permResolvers[repo]; resolver != nil {
-		resolver.RemoveEntriesUnder(path)
-		s.savePermissions(repo)
-	}
-	backend.SaveChangesAsync("delete folder "+path, name, email)
-	if s.shouldIndex(repo) {
-		s.idx.DeleteFolderIndex(repo, path)
 	}
 	return mcplib.NewToolResultText("deleted"), nil
 }
@@ -764,8 +705,7 @@ func (s *Server) moveFolder(ctx context.Context, req mcplib.CallToolRequest) (*m
 	if !s.canAccessRepo(repo, identity) {
 		return mcplib.NewToolResultError("repository not found"), nil
 	}
-	backend, ok := s.backends[repo]
-	if !ok {
+	if _, ok := s.backends[repo]; !ok {
 		return mcplib.NewToolResultError("repository not found"), nil
 	}
 	folderName := filepath.Base(path)
@@ -780,17 +720,8 @@ func (s *Server) moveFolder(ctx context.Context, req mcplib.CallToolRequest) (*m
 	if err := s.checkPermission(repo, identity, destParent+"/", permissions.Contributor); err != nil {
 		return mcplib.NewToolResultError("not found"), nil
 	}
-	if err := backend.RenameFolder(path, newRelPath); err != nil {
+	if err := repoactions.RenameFolder(s.actionDeps(repo, identity), path, newRelPath, "move folder "+path+" to "+newRelPath, name, email); err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("failed to move folder: %v", err)), nil
-	}
-	if resolver := s.permResolvers[repo]; resolver != nil {
-		resolver.RenamePath(path+"/", newRelPath+"/")
-		s.savePermissions(repo)
-	}
-	backend.SaveChangesAsync("move folder "+path+" to "+newRelPath, name, email)
-	if s.shouldIndex(repo) {
-		s.idx.DeleteFolderIndex(repo, path)
-		s.idx.ReindexFolder(repo, newRelPath)
 	}
 	return jsonResult(map[string]any{"name": folderName, "path": newRelPath}), nil
 }
