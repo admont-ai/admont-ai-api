@@ -1,0 +1,16 @@
+{{define "login.html"}}<!DOCTYPE html><html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Admont-AI Sign In</title><style>{{template "login-style"}}</style></head>
+<body><div class="card">
+  <h1>Admont-AI Sign In</h1>
+  {{template "error-block" .}}
+  <form method="POST" action="/mcp/login">
+    {{template "hidden-fields" .}}
+    <input type="hidden" name="step" value="password">
+    <label for="email">Email</label>
+    <input type="email" id="email" name="email" placeholder="you@example.com" required autofocus>
+    <label for="password">Password</label>
+    <input type="password" id="password" name="password" required>
+    <button type="submit">Sign In</button>
+  </form>
+</div></body></html>{{end}}

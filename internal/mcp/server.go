@@ -500,34 +500,27 @@ func (s *Server) oauthAuthorize(c *gin.Context) {
 
 // renderProviderChooser shows an HTML page letting the user pick an auth provider.
 // It preserves all original query parameters and adds the selected provider.
+type providerChoice struct {
+	Href  string
+	Label string
+}
+
 func (s *Server) renderProviderChooser(c *gin.Context, _ mcpAuthParams, providers []string) {
 	// Build buttons that re-submit to the same endpoint with ?provider=name added.
-	var buttons strings.Builder
+	choices := make([]providerChoice, 0, len(providers))
 	for _, p := range providers {
 		q := c.Request.URL.Query()
 		q.Set("provider", p)
-		href := "/mcp/authorize?" + q.Encode()
 		label := auth.ProviderDisplayName(p)
 		if p == "internal" {
 			label = "Internal Account"
 		}
-		fmt.Fprintf(&buttons,
-			`<a href="%s" class="btn">%s</a>`,
-			href, label,
-		)
+		choices = append(choices, providerChoice{Href: "/mcp/authorize?" + q.Encode(), Label: label})
 	}
 
-	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(fmt.Sprintf(`<!DOCTYPE html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Choose Login Provider</title>
-<style>
-  body{font-family:system-ui,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#f5f5f5}
-  .card{background:#fff;border-radius:12px;padding:2rem;box-shadow:0 2px 8px rgba(0,0,0,.1);text-align:center;max-width:360px;width:100%%}
-  h2{margin:0 0 1.5rem;color:#333}
-  .btn{display:block;padding:.75rem 1.5rem;margin:.5rem 0;border-radius:8px;background:#2563eb;color:#fff;text-decoration:none;font-size:1rem;transition:background .15s}
-  .btn:hover{background:#1d4ed8}
-</style></head>
-<body><div class="card"><h2>Sign in with</h2>%s</div></body></html>`, buttons.String())))
+	c.Status(http.StatusOK)
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	_ = mcpTemplates.ExecuteTemplate(c.Writer, "chooser.html", struct{ Providers []providerChoice }{Providers: choices})
 }
 
 func (s *Server) oauthCallback(c *gin.Context) {

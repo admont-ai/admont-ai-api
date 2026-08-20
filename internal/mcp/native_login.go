@@ -1,8 +1,6 @@
 package mcp
 
 import (
-	"fmt"
-	"html"
 	"net/http"
 
 	"github.com/christianfischer/md-wiki-server/internal/auth"
@@ -19,77 +17,43 @@ type mcpAuthParams struct {
 	CodeChallengeMethod string
 }
 
-// hiddenFields renders the MCP auth params as escaped hidden form inputs.
-func (p mcpAuthParams) hiddenFields() string {
-	f := func(name, val string) string {
-		return `<input type="hidden" name="` + name + `" value="` + html.EscapeString(val) + `">`
-	}
-	return f("client_id", p.ClientID) +
-		f("redirect_uri", p.RedirectURI) +
-		f("state", p.State) +
-		f("code_challenge", p.CodeChallenge) +
-		f("code_challenge_method", p.CodeChallengeMethod)
+// loginView is the template data for login.html and totp.html — both share
+// the hidden-fields and error-block partials, which read these field names.
+type loginView struct {
+	ClientID            string
+	RedirectURI         string
+	State               string
+	CodeChallenge       string
+	CodeChallengeMethod string
+	Error               string
+	PendingToken        string // only used by totp.html
 }
 
-const mcpLoginStyle = `
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: system-ui, -apple-system, sans-serif; background: #f5f5f5; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-  .card { background: #fff; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.1); padding: 2rem; width: 100%; max-width: 380px; }
-  h1 { font-size: 1.4rem; margin-bottom: 1.25rem; text-align: center; color: #222; }
-  label { display: block; font-size: .85rem; color: #555; margin-bottom: .25rem; }
-  input[type=email], input[type=password], input[type=text] { width: 100%; padding: .6rem; border: 1px solid #ddd; border-radius: 6px; font-size: 1rem; margin-bottom: 1rem; }
-  input:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37,99,235,.2); }
-  button { width: 100%; padding: .65rem; background: #2563eb; color: #fff; border: none; border-radius: 6px; font-size: 1rem; cursor: pointer; }
-  button:hover { background: #1d4ed8; }
-  .error { color: #c0392b; font-size: .85rem; text-align: center; margin-bottom: 1rem; }
-`
-
-func errorBlock(msg string) string {
-	if msg == "" {
-		return ""
+func newLoginView(p mcpAuthParams, errMsg string) loginView {
+	return loginView{
+		ClientID:            p.ClientID,
+		RedirectURI:         p.RedirectURI,
+		State:               p.State,
+		CodeChallenge:       p.CodeChallenge,
+		CodeChallengeMethod: p.CodeChallengeMethod,
+		Error:               errMsg,
 	}
-	return `<p class="error">` + html.EscapeString(msg) + `</p>`
 }
 
 // renderNativeLoginPage shows the MCP password login form.
 func renderNativeLoginPage(c *gin.Context, p mcpAuthParams, errMsg string) {
-	body := fmt.Sprintf(`<!DOCTYPE html><html><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Admont-AI Sign In</title><style>%s</style></head>
-<body><div class="card">
-  <h1>Admont-AI Sign In</h1>
-  %s
-  <form method="POST" action="/mcp/login">
-    %s
-    <input type="hidden" name="step" value="password">
-    <label for="email">Email</label>
-    <input type="email" id="email" name="email" placeholder="you@example.com" required autofocus>
-    <label for="password">Password</label>
-    <input type="password" id="password" name="password" required>
-    <button type="submit">Sign In</button>
-  </form>
-</div></body></html>`, mcpLoginStyle, errorBlock(errMsg), p.hiddenFields())
-	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(body))
+	c.Status(http.StatusOK)
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	_ = mcpTemplates.ExecuteTemplate(c.Writer, "login.html", newLoginView(p, errMsg))
 }
 
 // renderNativeTOTPPage shows the MCP 2FA step.
 func renderNativeTOTPPage(c *gin.Context, p mcpAuthParams, pendingToken, errMsg string) {
-	body := fmt.Sprintf(`<!DOCTYPE html><html><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Admont-AI 2FA</title><style>%s</style></head>
-<body><div class="card">
-  <h1>Two-Factor Authentication</h1>
-  %s
-  <form method="POST" action="/mcp/login">
-    %s
-    <input type="hidden" name="step" value="totp">
-    <input type="hidden" name="pending_token" value="%s">
-    <label for="totp_code">Authenticator or recovery code</label>
-    <input type="text" id="totp_code" name="totp_code" inputmode="text" autocomplete="one-time-code" required autofocus>
-    <button type="submit">Verify</button>
-  </form>
-</div></body></html>`, mcpLoginStyle, errorBlock(errMsg), p.hiddenFields(), html.EscapeString(pendingToken))
-	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(body))
+	view := newLoginView(p, errMsg)
+	view.PendingToken = pendingToken
+	c.Status(http.StatusOK)
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	_ = mcpTemplates.ExecuteTemplate(c.Writer, "totp.html", view)
 }
 
 // mcpLogin handles the native internal-user login form (password and TOTP steps)

@@ -1,0 +1,15 @@
+{{define "totp.html"}}<!DOCTYPE html><html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Admont-AI 2FA</title><style>{{template "login-style"}}</style></head>
+<body><div class="card">
+  <h1>Two-Factor Authentication</h1>
+  {{template "error-block" .}}
+  <form method="POST" action="/mcp/login">
+    {{template "hidden-fields" .}}
+    <input type="hidden" name="step" value="totp">
+    <input type="hidden" name="pending_token" value="{{.PendingToken}}">
+    <label for="totp_code">Authenticator or recovery code</label>
+    <input type="text" id="totp_code" name="totp_code" inputmode="text" autocomplete="one-time-code" required autofocus>
+    <button type="submit">Verify</button>
+  </form>
+</div></body></html>{{end}}
