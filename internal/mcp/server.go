@@ -22,6 +22,7 @@ import (
 	"github.com/christianfischer/md-wiki-server/internal/repo"
 	"github.com/christianfischer/md-wiki-server/internal/repoactions"
 	"github.com/christianfischer/md-wiki-server/internal/store/git_repo"
+	mcpclient "github.com/christianfischer/md-wiki-server/internal/store/mcp_client"
 	"github.com/gin-gonic/gin"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -78,16 +79,20 @@ type Server struct {
 	authCodes  sync.Map // code string → *authCodeEntry
 	authStates sync.Map // provider state string → *mcpAuthState
 
-	// Registered MCP OAuth clients (client_id → *mcpRegisteredClient)
-	registeredClients sync.Map
+	// Registered MCP OAuth clients (RFC 7591 dynamic client registration),
+	// persisted so a process restart doesn't invalidate every already-
+	// connected MCP client's client_id.
+	clientStore RegisteredClientStore
 
 	// Connected MCP sessions
 	mcpSessions sync.Map // sessionID string → *mcpClientSession
 }
 
-type mcpRegisteredClient struct {
-	RedirectURIs []string
-	CreatedAt    time.Time
+// RegisteredClientStore persists MCP OAuth dynamic client registrations.
+// Satisfied by *internal/store/mcp_client.Store; a fake is used in tests.
+type RegisteredClientStore interface {
+	CreateRegisteredClient(ctx context.Context, clientID string, redirectURIs []string) error
+	GetRegisteredClient(ctx context.Context, clientID string) (*mcpclient.RegisteredClient, error)
 }
 
 // mcpClientSession tracks an active MCP client connection.
@@ -196,6 +201,12 @@ func (s *Server) SetIndexer(idx *indexer.Indexer) {
 func (s *Server) SetSearch(b *backend.Holder, rs backend.RepoStateStore) {
 	s.searchBackend = b
 	s.repoState = rs
+}
+
+// SetRegisteredClientStore wires in persistent storage for MCP OAuth dynamic
+// client registrations.
+func (s *Server) SetRegisteredClientStore(cs RegisteredClientStore) {
+	s.clientStore = cs
 }
 
 // RegisterRoutes mounts all MCP-related routes on the Gin engine.
@@ -379,10 +390,15 @@ func (s *Server) oauthRegister(c *gin.Context) {
 		}
 	}
 
-	s.registeredClients.Store(clientID, &mcpRegisteredClient{
-		RedirectURIs: redirectURIs,
-		CreatedAt:    time.Now(),
-	})
+	if s.clientStore == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	if err := s.clientStore.CreateRegisteredClient(c.Request.Context(), clientID, redirectURIs); err != nil {
+		log.WithError(err).Error("MCP: failed to persist registered client")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
 
 	resp := map[string]any{
 		"client_id":                  clientID,
@@ -399,15 +415,18 @@ func (s *Server) oauthRegister(c *gin.Context) {
 	c.JSON(http.StatusCreated, resp)
 }
 
-func (s *Server) validateClientRedirectURI(clientID, redirectURI string) bool {
-	if clientID == "" {
+func (s *Server) validateClientRedirectURI(ctx context.Context, clientID, redirectURI string) bool {
+	if clientID == "" || s.clientStore == nil {
 		return false
 	}
-	val, ok := s.registeredClients.Load(clientID)
-	if !ok {
+	client, err := s.clientStore.GetRegisteredClient(ctx, clientID)
+	if err != nil {
+		log.WithError(err).Warn("MCP: failed to look up registered client")
 		return false
 	}
-	client := val.(*mcpRegisteredClient)
+	if client == nil {
+		return false
+	}
 	for _, uri := range client.RedirectURIs {
 		if uri == redirectURI {
 			return true
@@ -428,7 +447,7 @@ func (s *Server) oauthAuthorize(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "redirect_uri and code_challenge are required"})
 		return
 	}
-	if !s.validateClientRedirectURI(clientID, redirectURI) {
+	if !s.validateClientRedirectURI(c.Request.Context(), clientID, redirectURI) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "redirect_uri not registered for this client"})
 		return
 	}

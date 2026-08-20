@@ -74,7 +74,7 @@ func (s *Server) mcpLogin(c *gin.Context) {
 	if p.CodeChallengeMethod == "" {
 		p.CodeChallengeMethod = "S256"
 	}
-	if p.CodeChallenge == "" || !s.validateClientRedirectURI(p.ClientID, p.RedirectURI) {
+	if p.CodeChallenge == "" || !s.validateClientRedirectURI(c.Request.Context(), p.ClientID, p.RedirectURI) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid client_id, redirect_uri, or code_challenge"})
 		return
 	}

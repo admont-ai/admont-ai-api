@@ -11,6 +11,7 @@ import (
 	"github.com/christianfischer/md-wiki-server/internal/store/auth_provider"
 	"github.com/christianfischer/md-wiki-server/internal/store/git_repo"
 	"github.com/christianfischer/md-wiki-server/internal/store/llm_provider"
+	"github.com/christianfischer/md-wiki-server/internal/store/mcp_client"
 	"github.com/christianfischer/md-wiki-server/internal/store/migrations"
 	"github.com/christianfischer/md-wiki-server/internal/store/search_provider"
 	"github.com/christianfischer/md-wiki-server/internal/store/users"
@@ -34,6 +35,7 @@ type Store struct {
 	LLM           *llm_provider.Store
 	Search        *search_provider.Store
 	Conversations *ai_conversation.Store
+	MCPClients    *mcp_client.Store
 }
 
 // isValidIdentifier reports whether s is a safe Postgres identifier
@@ -121,6 +123,7 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 	s := &Store{pool: pool, dsn: dsn}
 	s.Users = users.NewStore(pool)
 	s.Conversations = ai_conversation.NewStore(pool)
+	s.MCPClients = mcp_client.NewStore(pool)
 	return s, nil
 }
 

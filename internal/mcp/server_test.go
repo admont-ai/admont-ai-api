@@ -17,11 +17,50 @@ import (
 	"github.com/christianfischer/md-wiki-server/internal/permissions"
 	"github.com/christianfischer/md-wiki-server/internal/repo"
 	"github.com/christianfischer/md-wiki-server/internal/store/git_repo"
+	mcpclient "github.com/christianfischer/md-wiki-server/internal/store/mcp_client"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/oauth2"
 )
+
+// fakeClientStore is an in-memory RegisteredClientStore for tests, standing
+// in for the DB-backed internal/store/mcp_client.Store.
+type fakeClientStore struct {
+	mu      sync.Mutex
+	clients map[string]*mcpclient.RegisteredClient
+	getErr  error // when set, GetRegisteredClient always returns this error
+}
+
+func newFakeClientStore() *fakeClientStore {
+	return &fakeClientStore{clients: map[string]*mcpclient.RegisteredClient{}}
+}
+
+func (f *fakeClientStore) CreateRegisteredClient(ctx context.Context, clientID string, redirectURIs []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.clients[clientID] = &mcpclient.RegisteredClient{ClientID: clientID, RedirectURIs: redirectURIs, CreatedAt: time.Now()}
+	return nil
+}
+
+func (f *fakeClientStore) GetRegisteredClient(ctx context.Context, clientID string) (*mcpclient.RegisteredClient, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	return f.clients[clientID], nil
+}
+
+// seedClient registers a client directly against the fake store, bypassing
+// the HTTP /mcp/register endpoint — for tests that need a pre-registered
+// client_id/redirect_uri pair to exercise /mcp/authorize.
+func seedClient(t *testing.T, s *Server, clientID string, redirectURIs []string) {
+	t.Helper()
+	fcs, ok := s.clientStore.(*fakeClientStore)
+	require.True(t, ok, "newRoutedTestServer must wire a *fakeClientStore")
+	fcs.clients[clientID] = &mcpclient.RegisteredClient{ClientID: clientID, RedirectURIs: redirectURIs, CreatedAt: time.Now()}
+}
 
 func newRoutedTestServer(t *testing.T) (*Server, *gin.Engine) {
 	t.Helper()
@@ -38,6 +77,7 @@ func newRoutedTestServer(t *testing.T) (*Server, *gin.Engine) {
 		auth.NewRegistry(),
 		"http://localhost:8080",
 	)
+	s.SetRegisteredClientStore(newFakeClientStore())
 
 	r := gin.New()
 	s.RegisterRoutes(r)
@@ -158,7 +198,7 @@ func fakeProviderEntry(name string) *auth.ProviderEntry {
 
 func TestOAuthAuthorize_NoProvidersConfigured(t *testing.T) {
 	s, r := newRoutedTestServer(t)
-	s.registeredClients.Store("client1", &mcpRegisteredClient{RedirectURIs: []string{"https://client.example/cb"}})
+	seedClient(t, s, "client1", []string{"https://client.example/cb"})
 
 	req := httptest.NewRequest("GET", "/mcp/authorize?client_id=client1&redirect_uri=https://client.example/cb&code_challenge=abc", nil)
 	w := httptest.NewRecorder()
@@ -179,9 +219,23 @@ func TestOAuthAuthorize_MissingRedirectURIOrChallenge(t *testing.T) {
 
 func TestOAuthAuthorize_UnregisteredRedirectURI(t *testing.T) {
 	s, r := newRoutedTestServer(t)
-	s.registeredClients.Store("client1", &mcpRegisteredClient{RedirectURIs: []string{"https://allowed.example/cb"}})
+	seedClient(t, s, "client1", []string{"https://allowed.example/cb"})
 
 	req := httptest.NewRequest("GET", "/mcp/authorize?client_id=client1&redirect_uri=https://not-allowed.example/cb&code_challenge=abc", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, 400, w.Code)
+}
+
+// TestValidateClientRedirectURI_StoreErrorFailsClosed confirms a lookup
+// error from the client store denies the request rather than panicking or
+// treating the error as "valid".
+func TestValidateClientRedirectURI_StoreErrorFailsClosed(t *testing.T) {
+	s, r := newRoutedTestServer(t)
+	seedClient(t, s, "client1", []string{"https://client.example/cb"})
+	s.clientStore.(*fakeClientStore).getErr = assert.AnError
+
+	req := httptest.NewRequest("GET", "/mcp/authorize?client_id=client1&redirect_uri=https://client.example/cb&code_challenge=abc", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	assert.Equal(t, 400, w.Code)
@@ -190,7 +244,7 @@ func TestOAuthAuthorize_UnregisteredRedirectURI(t *testing.T) {
 func TestOAuthAuthorize_SingleProviderRedirectsDirectly(t *testing.T) {
 	s, r := newRoutedTestServer(t)
 	s.registry.Register(fakeProviderEntry("google"))
-	s.registeredClients.Store("client1", &mcpRegisteredClient{RedirectURIs: []string{"https://client.example/cb"}})
+	seedClient(t, s, "client1", []string{"https://client.example/cb"})
 
 	req := httptest.NewRequest("GET", "/mcp/authorize?client_id=client1&redirect_uri=https://client.example/cb&code_challenge=abc", nil)
 	w := httptest.NewRecorder()
@@ -204,7 +258,7 @@ func TestOAuthAuthorize_MultipleProvidersShowsChooser(t *testing.T) {
 	s, r := newRoutedTestServer(t)
 	s.registry.Register(fakeProviderEntry("google"))
 	s.registry.Register(fakeProviderEntry("github"))
-	s.registeredClients.Store("client1", &mcpRegisteredClient{RedirectURIs: []string{"https://client.example/cb"}})
+	seedClient(t, s, "client1", []string{"https://client.example/cb"})
 
 	req := httptest.NewRequest("GET", "/mcp/authorize?client_id=client1&redirect_uri=https://client.example/cb&code_challenge=abc", nil)
 	w := httptest.NewRecorder()
@@ -219,7 +273,7 @@ func TestOAuthAuthorize_MultipleProvidersShowsChooser(t *testing.T) {
 func TestOAuthAuthorize_ExplicitInternalProvider(t *testing.T) {
 	s, r := newRoutedTestServer(t)
 	s.authn = &auth.Authenticator{}
-	s.registeredClients.Store("client1", &mcpRegisteredClient{RedirectURIs: []string{"https://client.example/cb"}})
+	seedClient(t, s, "client1", []string{"https://client.example/cb"})
 
 	req := httptest.NewRequest("GET", "/mcp/authorize?client_id=client1&redirect_uri=https://client.example/cb&code_challenge=abc&provider=internal", nil)
 	w := httptest.NewRecorder()

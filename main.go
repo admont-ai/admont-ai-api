@@ -636,6 +636,7 @@ func main() {
 		mcpServer.SetAuthenticator(authenticator)
 		mcpServer.SetIndexer(searchIndexer)
 		mcpServer.SetSearch(backendHolder, repoStateStore)
+		mcpServer.SetRegisteredClientStore(db.MCPClients)
 		mcpServer.RegisterRoutes(r)
 		log.Info("MCP server enabled at /mcp")
 	} else {
