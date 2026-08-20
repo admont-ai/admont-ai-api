@@ -21,7 +21,7 @@ services:
     image: erikvl87/languagetool
     container_name: admont-ai-languagetool
     ports:
-      - "8081:8010"
+      - "8082:8010"
     environment:
       Java_Xms: 512m
       Java_Xmx: 1g
