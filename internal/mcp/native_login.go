@@ -102,16 +102,20 @@ func (s *Server) mcpLogin(c *gin.Context) {
 		return
 	}
 
-	// Password step.
-	email := c.PostForm("email")
+	// Password step. VerifyPassword accepts either a username or an email
+	// (internal users normally log in via username, not email) — but
+	// CreatePendingToken/VerifyTOTP/issueMCPCode all key strictly on the
+	// resolved user's actual email, so use user.Email from here on, not the
+	// raw login identifier the user typed.
+	username := c.PostForm("username")
 	password := c.PostForm("password")
-	if email == "" || password == "" {
-		renderNativeLoginPage(c, p, "Email and password are required.")
+	if username == "" || password == "" {
+		renderNativeLoginPage(c, p, "Username and password are required.")
 		return
 	}
-	user, err := s.authn.VerifyPassword(ctx, ip, email, password)
+	user, err := s.authn.VerifyPassword(ctx, ip, username, password)
 	if err != nil {
-		msg := "Invalid email or password."
+		msg := "Invalid username or password."
 		if err == auth.ErrAccountSuspended {
 			msg = "Your account has been suspended."
 		}
@@ -119,10 +123,10 @@ func (s *Server) mcpLogin(c *gin.Context) {
 		return
 	}
 	if user.TOTPEnabled {
-		renderNativeTOTPPage(c, p, s.authn.CreatePendingToken(email), "")
+		renderNativeTOTPPage(c, p, s.authn.CreatePendingToken(user.Email), "")
 		return
 	}
-	name := email
+	name := user.Email
 	if user.FirstName != "" || user.LastName != "" {
 		name = user.FirstName
 		if user.LastName != "" {
@@ -132,5 +136,5 @@ func (s *Server) mcpLogin(c *gin.Context) {
 			name += user.LastName
 		}
 	}
-	s.issueMCPCode(c, p.RedirectURI, p.State, p.CodeChallenge, p.CodeChallengeMethod, email, name, "", "internal")
+	s.issueMCPCode(c, p.RedirectURI, p.State, p.CodeChallenge, p.CodeChallengeMethod, user.Email, name, "", "internal")
 }

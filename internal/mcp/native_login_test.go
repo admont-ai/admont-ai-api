@@ -56,6 +56,21 @@ func TestRenderNativeLoginPage_HiddenFieldsAndForm(t *testing.T) {
 	assert.NotContains(t, body, `class="error"`)
 }
 
+// TestRenderNativeLoginPage_AcceptsUsernameNotEmail is the regression test
+// for internal users logging in via username: the field must be a plain
+// text input named "username", not an <input type="email"> (which browsers
+// reject as invalid for a non-email-shaped value like a username).
+func TestRenderNativeLoginPage_AcceptsUsernameNotEmail(t *testing.T) {
+	w := recordRender(func(c *gin.Context) {
+		renderNativeLoginPage(c, mcpAuthParams{}, "")
+	})
+
+	body := w.Body.String()
+	assert.Contains(t, body, `name="username"`)
+	assert.NotContains(t, body, `type="email"`)
+	assert.NotContains(t, body, `name="email"`)
+}
+
 func TestRenderNativeTOTPPage_IncludesPendingToken(t *testing.T) {
 	p := mcpAuthParams{ClientID: "c1", RedirectURI: "https://client.example/cb", CodeChallenge: "chal", CodeChallengeMethod: "S256"}
 	w := recordRender(func(c *gin.Context) {
