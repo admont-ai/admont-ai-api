@@ -770,18 +770,24 @@ func (s *Server) cleanupLoop() {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for range ticker.C {
-		now := time.Now()
-		s.authCodes.Range(func(key, value any) bool {
-			if now.After(value.(*authCodeEntry).ExpiresAt) {
-				s.authCodes.Delete(key)
-			}
-			return true
-		})
-		s.authStates.Range(func(key, value any) bool {
-			if now.Sub(value.(*mcpAuthState).CreatedAt) > 10*time.Minute {
-				s.authStates.Delete(key)
-			}
-			return true
-		})
+		s.sweep(time.Now())
 	}
+}
+
+// sweep removes expired authorization codes and pending auth states as of
+// now. Split out from cleanupLoop so tests can drive it with a synthetic
+// time instead of waiting on the real 1-minute ticker.
+func (s *Server) sweep(now time.Time) {
+	s.authCodes.Range(func(key, value any) bool {
+		if now.After(value.(*authCodeEntry).ExpiresAt) {
+			s.authCodes.Delete(key)
+		}
+		return true
+	})
+	s.authStates.Range(func(key, value any) bool {
+		if now.Sub(value.(*mcpAuthState).CreatedAt) > 10*time.Minute {
+			s.authStates.Delete(key)
+		}
+		return true
+	})
 }

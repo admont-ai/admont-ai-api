@@ -28,6 +28,7 @@ type FakeBackend struct {
 
 	supportsHistory bool
 	history         []repo.FileChange // synthetic history returned for any file, newest first
+	commitContent   map[string]string // "commitHash|path" -> content, set via SeedCommitContent
 
 	SaveCalls []SaveCall
 }
@@ -258,11 +259,31 @@ func (f *FakeBackend) GetFileAtCommit(commitHash, subfolder, filename string) (s
 	if !f.supportsHistory {
 		return "", repo.ErrNotSupported
 	}
+	f.mu.Lock()
+	if content, ok := f.commitContent[commitHash+"|"+joinPath(subfolder, filename)]; ok {
+		f.mu.Unlock()
+		return content, nil
+	}
+	f.mu.Unlock()
 	content, err := f.GetFile(subfolder, filename)
 	if err != nil {
 		return "", err
 	}
 	return string(content), nil
+}
+
+// SeedCommitContent registers the content GetFileAtCommit returns for a
+// specific (commitHash, path) pair, overriding the default fallback (which
+// just returns the file's current content) — for tests that need a file's
+// content to have genuinely diverged since a given commit.
+func (f *FakeBackend) SeedCommitContent(commitHash, fullPath, content string) *FakeBackend {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.commitContent == nil {
+		f.commitContent = make(map[string]string)
+	}
+	f.commitContent[commitHash+"|"+fullPath] = content
+	return f
 }
 
 func (f *FakeBackend) GetFileDiffWithCommit(commitHash, subfolder, filename string) (string, error) {
