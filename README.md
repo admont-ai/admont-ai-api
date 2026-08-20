@@ -141,6 +141,7 @@ Configuration is read from environment variables (a local `.env` is supported) o
 | `LOCAL_REPO_PATH` | `/tmp/admont-api/local-repos` | Working directory for local (non-Git) repositories |
 | `IMPORT_PATH` | `/tmp/admont-api/import` | Staging directory for content imports |
 | `LANGUAGETOOL_URL` | _(empty)_ | Base URL of a LanguageTool server for grammar/spell checking |
+| `MCP_ENABLED` | `true` | Enables the MCP server (`/mcp`) exposing wiki tools to AI agents; set to `false` to disable |
 
 > A few advanced options are only settable via `config.yaml` (not environment variables), including `internal_auth.enabled`, `internal_auth.admin_url`/`public_url`, `internal_auth.max_failed_login`, `internal_auth.failed_login_interval_mins`, and the passkey settings `internal_auth.webauthn_rp_id` / `internal_auth.webauthn_origins`.
 

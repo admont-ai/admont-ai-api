@@ -81,6 +81,7 @@ type Config struct {
 	ExternalAuth    ExternalAuthConfig `mapstructure:"external_auth"`
 	Search          SearchConfig       `mapstructure:"search"`
 	ImportPath      string             `mapstructure:"import_path"`
+	MCPEnabled      bool               `mapstructure:"mcp_enabled"`
 }
 
 // Redacted returns a copy of the config with secret values masked, suitable for
@@ -131,6 +132,7 @@ func Load() (*Config, error) {
 	viper.SetDefault("search.vocab_path", "models/vocab.txt")
 
 	viper.SetDefault("import_path", "/tmp/admont-api/import")
+	viper.SetDefault("mcp_enabled", true)
 
 	viper.AutomaticEnv()
 
@@ -144,6 +146,7 @@ func Load() (*Config, error) {
 	_ = viper.BindEnv("log_level", "LOG_LEVEL")
 	_ = viper.BindEnv("languagetool_url", "LANGUAGETOOL_URL")
 	_ = viper.BindEnv("import_path", "IMPORT_PATH")
+	_ = viper.BindEnv("mcp_enabled", "MCP_ENABLED")
 	_ = viper.BindEnv("encryption_key", "ADMONT_ENCRYPTION_KEY")
 	_ = viper.BindEnv("external_auth.signup_mode", "EXTERNAL_AUTH_SIGNUP_MODE")
 	_ = viper.BindEnv("internal_auth.webauthn_rp_id", "INTERNAL_AUTH_WEBAUTHN_RP_ID")

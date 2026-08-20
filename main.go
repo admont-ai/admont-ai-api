@@ -620,20 +620,27 @@ func main() {
 		return name
 	})
 
-	// MCP server (SSE transport with multi-provider OAuth)
-	mcpServer := wikimcp.NewServer(
-		backends, draftManagers, docPaths, repoConfigs, &repoReady,
-		repoHandler.PermResolvers(),
-		jwtService,
-		mcpRegistry,
-		baseURL,
-	)
-	mcpServer.SetSystemAdminCheck(adminHandler.CanManageRepos)
-	mcpServer.SetAuthenticator(authenticator)
-	mcpServer.SetIndexer(searchIndexer)
-	mcpServer.SetSearch(backendHolder, repoStateStore)
-	mcpServer.RegisterRoutes(r)
-	log.Info("MCP server enabled at /mcp/sse")
+	// MCP server (SSE + streamable HTTP transports with multi-provider OAuth).
+	// Gated by MCP_ENABLED (default true) — mcpServer stays nil when disabled;
+	// every use of it below must handle that.
+	var mcpServer *wikimcp.Server
+	if cfg.MCPEnabled {
+		mcpServer = wikimcp.NewServer(
+			backends, draftManagers, docPaths, repoConfigs, &repoReady,
+			repoHandler.PermResolvers(),
+			jwtService,
+			mcpRegistry,
+			baseURL,
+		)
+		mcpServer.SetSystemAdminCheck(adminHandler.CanManageRepos)
+		mcpServer.SetAuthenticator(authenticator)
+		mcpServer.SetIndexer(searchIndexer)
+		mcpServer.SetSearch(backendHolder, repoStateStore)
+		mcpServer.RegisterRoutes(r)
+		log.Info("MCP server enabled at /mcp")
+	} else {
+		log.Info("MCP server disabled (MCP_ENABLED=false)")
+	}
 
 	meGroup := r.Group("/me")
 	meGroup.Use(middleware.JWTAuth(jwtService))
@@ -977,6 +984,9 @@ func main() {
 	)
 
 	fuegogin.Get(engine, meGroup, "/mcp-clients", func(c fuego.ContextNoBody) ([]mcpClientResponse, error) {
+		if mcpServer == nil {
+			return []mcpClientResponse{}, nil
+		}
 		gc := c.Context().(*gin.Context)
 		identity, _ := gc.Get(middleware.CtxUserIdentity)
 		userIdentity, _ := identity.(string)
