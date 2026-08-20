@@ -214,7 +214,7 @@ func (s *Server) getRepo(ctx context.Context, req mcplib.CallToolRequest) (*mcpl
 			permPath += "/"
 		}
 		resolver := s.permResolvers[repo]
-		if resolver != nil && !resolver.Check(identity, permPath, permissions.Viewer) {
+		if !isAdmin && resolver != nil && !resolver.Check(identity, permPath, permissions.Viewer) {
 			if !e.IsDir || !resolver.HasAccessibleDescendant(identity, entryPath, permissions.Viewer) {
 				continue
 			}

@@ -302,6 +302,26 @@ func TestGetRepo_HidesDotPathsForNonAdmin(t *testing.T) {
 	assert.NotContains(t, resultText(t, res), ".git")
 }
 
+// TestGetRepo_AdminBypassesResolverDenial is the regression test for a real
+// bug: get_repo's per-entry permission filter checked resolver.Check without
+// consulting isAdmin, so even a system admin saw an empty listing whenever
+// the repo's permissions file didn't explicitly grant them access (e.g. a
+// restrictive "root: default: none" with grants scoped to specific paths/
+// users only) — unlike every other MCP permission check, which bypasses for
+// admins unconditionally.
+func TestGetRepo_AdminBypassesResolverDenial(t *testing.T) {
+	backend := repotest.NewFakeBackend().Seed("readme.md", []byte("x")).Seed("Folder 1/page.md", []byte("y"))
+	resolver := resolverWithRoot(permissions.None) // matches a real "default: none" permissions file
+	s := newTestServer(t, backend, testServerOpts{publicAccess: true, resolver: resolver, isAdmin: true})
+	ctx := ctxWithIdentity("admin@example.com", "admin@example.com", "Admin")
+
+	res, err := s.getRepo(ctx, callReq(map[string]any{"repo": testRepo}))
+	require.NoError(t, err)
+	body := resultText(t, res)
+	assert.Contains(t, body, "readme.md")
+	assert.Contains(t, body, "Folder 1")
+}
+
 // --- history tools ---
 
 func TestGetFileHistory_UnsupportedBackend(t *testing.T) {
