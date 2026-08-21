@@ -292,8 +292,31 @@ func TestIsDotPath(t *testing.T) {
 		{"docs/.hidden/file.md", true},
 		{".gitignore", true},
 		{"my.folder/readme.md", false},
+		{".", false},  // "repo root" sentinel used by callers, not a hidden name
+		{"./", false}, // same sentinel with the trailing slash checkPermission callers append
+		{"..", true},
 	}
 	for _, tt := range tests {
 		assert.Equal(t, tt.want, IsDotPath(tt.path), tt.path)
 	}
+}
+
+// TestCheckPermission_RootFolderNotTreatedAsDotPath is the regression test
+// for a real bug: creating a folder/file at the repo root builds a
+// permission-check path of "./" (the "no parent folder" sentinel plus the
+// trailing slash checkPermission callers append for directory paths), which
+// IsDotPath used to flag as a hidden path — denying every non-admin
+// Contributor from creating anything at repo root regardless of their
+// actual permission level.
+func TestCheckPermission_RootFolderNotTreatedAsDotPath(t *testing.T) {
+	d := Deps{Resolver: resolverWithRoot(permissions.Contributor)}
+	assert.NoError(t, CheckPermission(d, "alice", "./", permissions.Contributor))
+}
+
+func TestCheckPermSimple_RootFolderNotTreatedAsDotPath(t *testing.T) {
+	// CheckPermSimple doesn't call IsDotPath at all (see its doc comment),
+	// but assert the same root-path scenario works here too since it shares
+	// the same "./" sentinel construction at call sites.
+	d := Deps{Resolver: resolverWithRoot(permissions.Contributor)}
+	assert.NoError(t, CheckPermSimple(d, "alice", "./", permissions.Contributor))
 }

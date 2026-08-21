@@ -182,6 +182,23 @@ func TestCreateFolder_CommitMessageAndResponse(t *testing.T) {
 	assert.Equal(t, "create folder docs/new-folder", backend.SaveCalls[0].Message)
 }
 
+// TestCreateFolder_AtRepoRoot_ContributorNotAdmin is the regression test for
+// a real bug: creating a folder at the repo root (no "path") builds a
+// permission-check path of "./" — a bare non-admin Contributor grant used to
+// be denied there because "./" was incorrectly treated as a hidden dot-path.
+func TestCreateFolder_AtRepoRoot_ContributorNotAdmin(t *testing.T) {
+	backend := repotest.NewFakeBackend()
+	s := newTestServer(t, backend, testServerOpts{publicAccess: true, resolver: resolverWithRoot(permissions.Contributor)})
+	ctx := ctxWithIdentity("alice@example.com", "alice@example.com", "Alice")
+
+	res, err := s.createFolder(ctx, callReq(map[string]any{
+		"repo": testRepo, "name": "new-folder",
+	}))
+	require.NoError(t, err)
+	assert.False(t, res.IsError, "expected success, got: %s", resultText(t, res))
+	assert.JSONEq(t, `{"name":"new-folder","path":"new-folder"}`, resultText(t, res))
+}
+
 func TestRenameFolder_CommitMessageAndResponse(t *testing.T) {
 	backend := repotest.NewFakeBackend().Seed("docs/a.md", []byte("x"))
 	s := newTestServer(t, backend, testServerOpts{publicAccess: true, resolver: resolverWithRoot(permissions.ContentManager)})

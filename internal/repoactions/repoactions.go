@@ -230,9 +230,17 @@ func SplitPath(filePath string) (subfolder, filename string) {
 }
 
 // IsDotPath reports whether any path segment starts with "." (hidden files,
-// .git, .drafts, etc.), which are always denied to non-admin callers.
+// .git, .drafts, etc.), which are always denied to non-admin callers. A bare
+// "." segment is exempted — it's the POSIX self-reference used as a "repo
+// root" sentinel by callers building a permission-check path like
+// parentFolder+"/" for a root-level operation (e.g. "./"), not a real hidden
+// name; treating it as one incorrectly denied every non-admin write at repo
+// root regardless of their actual permission level.
 func IsDotPath(filePath string) bool {
 	for _, part := range strings.Split(filePath, "/") {
+		if part == "." {
+			continue
+		}
 		if strings.HasPrefix(part, ".") {
 			return true
 		}
