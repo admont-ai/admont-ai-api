@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/christianfischer/md-wiki-server/internal/draft"
 	"github.com/christianfischer/md-wiki-server/internal/llm"
 	"github.com/christianfischer/md-wiki-server/internal/permissions"
 	"github.com/christianfischer/md-wiki-server/internal/pg_vector/backend"
@@ -75,6 +76,7 @@ type AgentRequesthandler struct {
 	permResolvers map[string]*permissions.Resolver
 	docPaths      map[string]string
 	indexer       *indexer.Indexer
+	draftManagers map[string]*draft.Manager
 	convStore     *ai_conversation.Store
 	summarizer    *llm.Summarizer
 	isSystemAdmin func(string) bool
@@ -116,6 +118,12 @@ func (h *AgentRequesthandler) getClient() *llm.Client {
 // SetSystemAdminCheck sets the function used to check if a user is a system admin.
 func (h *AgentRequesthandler) SetSystemAdminCheck(fn func(string) bool) {
 	h.isSystemAdmin = fn
+}
+
+// SetDraftManagers wires in per-repo draft managers, used to block updating
+// a file that has another user's pending draft.
+func (h *AgentRequesthandler) SetDraftManagers(dm map[string]*draft.Manager) {
+	h.draftManagers = dm
 }
 
 func (h *AgentRequesthandler) SetConversationStore(store *ai_conversation.Store, summarizer *llm.Summarizer) {
@@ -485,6 +493,18 @@ func (h *AgentRequesthandler) toolWriteFile(repoSlug, identity, userName, p, con
 	}
 	if !create && statErr != nil {
 		return "error: file does not exist — use create_file"
+	}
+
+	// A brand-new file can't have a pre-existing draft — only guard updates.
+	if !create {
+		if dm, ok := h.draftManagers[repoSlug]; ok {
+			if other, err := dm.OtherUsersDraft(subfolder, filename, identity); err == nil && other != nil {
+				if !(h.isSystemAdmin != nil && h.isSystemAdmin(identity)) {
+					return fmt.Sprintf("error: file has a pending draft from %s (%s), updated %s — only the draft owner or a repo admin can act on it while the draft is pending",
+						other.UserName, other.UserEmail, other.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"))
+				}
+			}
+		}
 	}
 
 	verb := "update"

@@ -323,6 +323,19 @@ func (s *Server) getFileInfo(ctx context.Context, req mcplib.CallToolRequest) (*
 		}
 	}
 
+	// Surface whether ANOTHER user has a pending draft — owner identity and
+	// timestamp only, never the draft's content.
+	if !info.IsDir {
+		if dm, ok := s.draftManagers[repo]; ok {
+			if other, err := dm.OtherUsersDraft(subfolder, filename, identity); err == nil && other != nil {
+				resp["pending_draft_owner_name"] = other.UserName
+				resp["pending_draft_owner_email"] = other.UserEmail
+				resp["pending_draft_updated_at"] = other.UpdatedAt.Format("2006-01-02T15:04:05Z07:00")
+				resp["locked_by_pending_draft"] = !(identity != "" && s.isSystemAdmin != nil && s.isSystemAdmin(identity))
+			}
+		}
+	}
+
 	return jsonResult(resp), nil
 }
 
@@ -465,6 +478,9 @@ func (s *Server) updateFile(ctx context.Context, req mcplib.CallToolRequest) (*m
 	if err := s.checkPermission(repo, identity, path, permissions.Contributor); err != nil {
 		return mcplib.NewToolResultError("not found"), nil
 	}
+	if msg := s.draftLockMessage(repo, subfolder, filename, identity); msg != "" {
+		return mcplib.NewToolResultError(msg), nil
+	}
 	if err := repoactions.UpdateFile(s.actionDeps(repo, identity), subfolder, filename, path, []byte(content), "update "+path, name, email); err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("failed to update file: %v", err)), nil
 	}
@@ -489,6 +505,9 @@ func (s *Server) deleteFile(ctx context.Context, req mcplib.CallToolRequest) (*m
 	subfolder, filename := splitPath(path)
 	if err := s.checkPermission(repo, identity, path, permissions.ContentManager); err != nil {
 		return mcplib.NewToolResultError("not found"), nil
+	}
+	if msg := s.draftLockMessage(repo, subfolder, filename, identity); msg != "" {
+		return mcplib.NewToolResultError(msg), nil
 	}
 	if err := repoactions.DeleteFile(s.actionDeps(repo, identity), subfolder, filename, path, "delete "+path, name, email); err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("failed to delete file: %v", err)), nil
@@ -524,6 +543,9 @@ func (s *Server) moveFile(ctx context.Context, req mcplib.CallToolRequest) (*mcp
 	if err := s.checkPermission(repo, identity, destFolder+"/", permissions.Contributor); err != nil {
 		return mcplib.NewToolResultError("not found"), nil
 	}
+	if msg := s.draftLockMessage(repo, oldSubfolder, filename, identity); msg != "" {
+		return mcplib.NewToolResultError(msg), nil
+	}
 	if err := repoactions.MoveFile(s.actionDeps(repo, identity), oldSubfolder, filename, dest, filename, path, newFilePath, "move "+path+" to "+newFilePath, name, email); err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("failed to move file: %v", err)), nil
 	}
@@ -553,6 +575,9 @@ func (s *Server) renameFile(ctx context.Context, req mcplib.CallToolRequest) (*m
 	newFilePath := filepath.Join(subfolder, newName)
 	if err := s.checkPermission(repo, identity, path, permissions.Contributor); err != nil {
 		return mcplib.NewToolResultError("not found"), nil
+	}
+	if msg := s.draftLockMessage(repo, subfolder, oldName, identity); msg != "" {
+		return mcplib.NewToolResultError(msg), nil
 	}
 	if err := repoactions.MoveFile(s.actionDeps(repo, identity), subfolder, oldName, subfolder, newName, path, newFilePath, "rename "+path+" to "+newFilePath, name, email); err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("failed to rename file: %v", err)), nil
@@ -662,6 +687,9 @@ func (s *Server) renameFolder(ctx context.Context, req mcplib.CallToolRequest) (
 	if err := s.checkPermission(repo, identity, path+"/", permissions.Contributor); err != nil {
 		return mcplib.NewToolResultError("not found"), nil
 	}
+	if msg := s.draftLockMessageForFolder(repo, path, identity); msg != "" {
+		return mcplib.NewToolResultError(msg), nil
+	}
 	if err := repoactions.RenameFolder(s.actionDeps(repo, identity), path, newRelPath, "rename folder "+path+" to "+newRelPath, name, email); err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("failed to rename folder: %v", err)), nil
 	}
@@ -685,6 +713,9 @@ func (s *Server) deleteFolder(ctx context.Context, req mcplib.CallToolRequest) (
 	}
 	if err := s.checkPermission(repo, identity, path+"/", permissions.ContentManager); err != nil {
 		return mcplib.NewToolResultError("not found"), nil
+	}
+	if msg := s.draftLockMessageForFolder(repo, path, identity); msg != "" {
+		return mcplib.NewToolResultError(msg), nil
 	}
 	if err := repoactions.DeleteFolder(s.actionDeps(repo, identity), path, "delete folder "+path, name, email); err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("failed to delete folder: %v", err)), nil
@@ -720,6 +751,9 @@ func (s *Server) moveFolder(ctx context.Context, req mcplib.CallToolRequest) (*m
 	if err := s.checkPermission(repo, identity, destParent+"/", permissions.Contributor); err != nil {
 		return mcplib.NewToolResultError("not found"), nil
 	}
+	if msg := s.draftLockMessageForFolder(repo, path, identity); msg != "" {
+		return mcplib.NewToolResultError(msg), nil
+	}
 	if err := repoactions.RenameFolder(s.actionDeps(repo, identity), path, newRelPath, "move folder "+path+" to "+newRelPath, name, email); err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("failed to move folder: %v", err)), nil
 	}
@@ -751,6 +785,9 @@ func (s *Server) saveDraft(ctx context.Context, req mcplib.CallToolRequest) (*mc
 	subfolder, filename := splitPath(path)
 	if err := s.checkPermission(repo, identity, path, permissions.Contributor); err != nil {
 		return mcplib.NewToolResultError("not found"), nil
+	}
+	if msg := s.draftLockMessage(repo, subfolder, filename, identity); msg != "" {
+		return mcplib.NewToolResultError(msg), nil
 	}
 	baseCommitHash := ""
 	if hash, err := backend.GetFileCommitHash(subfolder, filename); err == nil {

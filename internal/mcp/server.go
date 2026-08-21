@@ -689,6 +689,49 @@ func (s *Server) checkPermission(repoSlug, identity, path string, required permi
 	return repoactions.CheckPermission(s.actionDeps(repoSlug, identity), identity, path, required)
 }
 
+// draftLockMessage returns a non-empty error message if another user's
+// pending draft on (subfolder, filename) blocks identity from acting on it,
+// or "" if the action may proceed (no draft manager configured, no other
+// pending draft, or identity is a repo admin — same bypass as
+// checkPermission). Callers invoke this AFTER checkPermission succeeds;
+// it's an additional gate, not a replacement.
+func (s *Server) draftLockMessage(repoSlug, subfolder, filename, identity string) string {
+	dm, ok := s.draftManagers[repoSlug]
+	if !ok {
+		return ""
+	}
+	other, err := dm.OtherUsersDraft(subfolder, filename, identity)
+	if err != nil || other == nil {
+		return ""
+	}
+	if identity != "" && s.isSystemAdmin != nil && s.isSystemAdmin(identity) {
+		return ""
+	}
+	return fmt.Sprintf(
+		"file has a pending draft from %s (%s), updated %s — only the draft owner or a repo admin can act on it while the draft is pending",
+		other.UserName, other.UserEmail, other.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"))
+}
+
+// draftLockMessageForFolder is the folder-recursive form of
+// draftLockMessage, for operations (delete_folder, move_folder) that would
+// orphan or invalidate any pending draft underneath the folder.
+func (s *Server) draftLockMessageForFolder(repoSlug, folderPath, identity string) string {
+	dm, ok := s.draftManagers[repoSlug]
+	if !ok {
+		return ""
+	}
+	other, path, err := dm.OtherUsersDraftUnderFolder(folderPath, identity)
+	if err != nil || other == nil {
+		return ""
+	}
+	if identity != "" && s.isSystemAdmin != nil && s.isSystemAdmin(identity) {
+		return ""
+	}
+	return fmt.Sprintf(
+		"%s has a pending draft from %s (%s), updated %s — only the draft owner or a repo admin can act on this folder while the draft is pending",
+		path, other.UserName, other.UserEmail, other.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"))
+}
+
 func (s *Server) canAccessRepo(repoSlug, identity string) bool {
 	rc, ok := s.repoConfigs[repoSlug]
 	if !ok {

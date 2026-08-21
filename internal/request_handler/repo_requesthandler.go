@@ -140,6 +140,14 @@ type fileResponse struct {
 	DraftCreatedAt  string `json:"draft_created_at,omitempty"`
 	DraftUpdatedAt  string `json:"draft_updated_at,omitempty"`
 	Permission      string `json:"permission,omitempty"`
+
+	// Pending draft from ANOTHER user (never the caller's own — see IsDraft
+	// above for that). Only owner identity + timestamp are exposed; the
+	// draft's content is never visible to anyone but its owner.
+	PendingDraftOwnerName  string `json:"pending_draft_owner_name,omitempty"`
+	PendingDraftOwnerEmail string `json:"pending_draft_owner_email,omitempty"`
+	PendingDraftUpdatedAt  string `json:"pending_draft_updated_at,omitempty"`
+	LockedByPendingDraft   bool   `json:"locked_by_pending_draft,omitempty"`
 }
 
 type fileHistoryEntry struct {
@@ -289,6 +297,49 @@ func (h *RepoRequesthandler) checkPermission(repoSlug, userEmail, path string, r
 		return errNotFound
 	}
 	return nil
+}
+
+// draftLockError returns a 403 if another user's pending draft on
+// (subfolder, filename) blocks userEmail from acting on it, or nil if the
+// action may proceed (no draft manager configured, no other pending draft,
+// or the caller is a repo admin — same bypass as checkPermission). Callers
+// invoke this AFTER checkPermission succeeds; it's an additional gate, not
+// a replacement.
+func (h *RepoRequesthandler) draftLockError(repoName, subfolder, filename, userEmail string) error {
+	dm, ok := h.draftManagers[repoName]
+	if !ok {
+		return nil
+	}
+	other, err := dm.OtherUsersDraft(subfolder, filename, userEmail)
+	if err != nil || other == nil {
+		return nil
+	}
+	if userEmail != "" && h.isSystemAdmin != nil && h.isSystemAdmin(userEmail) {
+		return nil
+	}
+	return fuego.ForbiddenError{Detail: fmt.Sprintf(
+		"file has a pending draft from %s (%s), updated %s — only the draft owner or a repo admin can act on it while the draft is pending",
+		other.UserName, other.UserEmail, other.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"))}
+}
+
+// draftLockErrorForFolder is the folder-recursive form of draftLockError,
+// for operations (delete_folder, move_folder) that would orphan or
+// invalidate any pending draft underneath the folder.
+func (h *RepoRequesthandler) draftLockErrorForFolder(repoName, folderPath, userEmail string) error {
+	dm, ok := h.draftManagers[repoName]
+	if !ok {
+		return nil
+	}
+	other, path, err := dm.OtherUsersDraftUnderFolder(folderPath, userEmail)
+	if err != nil || other == nil {
+		return nil
+	}
+	if userEmail != "" && h.isSystemAdmin != nil && h.isSystemAdmin(userEmail) {
+		return nil
+	}
+	return fuego.ForbiddenError{Detail: fmt.Sprintf(
+		"%s has a pending draft from %s (%s), updated %s — only the draft owner or a repo admin can act on this folder while the draft is pending",
+		path, other.UserName, other.UserEmail, other.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"))}
 }
 
 // permError converts a checkPermission error to the appropriate fuego error.
@@ -694,6 +745,19 @@ func (h *RepoRequesthandler) GetFileInfo(c fuego.ContextNoBody) (fileResponse, e
 		}
 	}
 
+	// Surface whether ANOTHER user has a pending draft — owner identity and
+	// timestamp only, never the draft's content.
+	if !info.IsDir {
+		if dm, ok := h.draftManagers[repoName]; ok {
+			if other, err := dm.OtherUsersDraft(subfolder, filename, userEmail); err == nil && other != nil {
+				resp.PendingDraftOwnerName = other.UserName
+				resp.PendingDraftOwnerEmail = other.UserEmail
+				resp.PendingDraftUpdatedAt = other.UpdatedAt.Format("2006-01-02T15:04:05Z07:00")
+				resp.LockedByPendingDraft = !(userEmail != "" && h.isSystemAdmin != nil && h.isSystemAdmin(userEmail))
+			}
+		}
+	}
+
 	return resp, nil
 }
 
@@ -889,6 +953,9 @@ func (h *RepoRequesthandler) UpdateFile(c fuego.ContextWithBody[fileRequest]) (f
 	if err := h.checkPermission(repoName, userEmail, filePath, permissions.Contributor); err != nil {
 		return fileResponse{}, permError(err)
 	}
+	if err := h.draftLockError(repoName, subfolder, filename, userEmail); err != nil {
+		return fileResponse{}, err
+	}
 
 	if err := backend.AddFile(subfolder, filename, []byte(body.Content)); err != nil {
 		log.WithError(err).WithField("repo", repoName).WithField("path", filePath).Warn("failed to update file")
@@ -925,6 +992,9 @@ func (h *RepoRequesthandler) DeleteFile(c fuego.ContextNoBody) (any, error) {
 
 	if err := h.checkPermission(repoName, userEmail, filePath, permissions.ContentManager); err != nil {
 		return nil, permError(err)
+	}
+	if err := h.draftLockError(repoName, subfolder, filename, userEmail); err != nil {
+		return nil, err
 	}
 
 	if err := backend.DeleteFile(subfolder, filename); err != nil {
@@ -980,6 +1050,9 @@ func (h *RepoRequesthandler) MoveFile(c fuego.ContextWithBody[fileMoveRequest]) 
 	if err := h.checkPermission(repoName, userEmail, destFolder+"/", permissions.Contributor); err != nil {
 		return fileResponse{}, permError(err)
 	}
+	if err := h.draftLockError(repoName, oldSubfolder, filename, userEmail); err != nil {
+		return fileResponse{}, err
+	}
 
 	if err := backend.MoveFile(oldSubfolder, filename, dest, filename); err != nil {
 		log.WithError(err).WithField("repo", repoName).WithField("path", filePath).Warn("failed to move file")
@@ -1032,6 +1105,9 @@ func (h *RepoRequesthandler) RenameFile(c fuego.ContextWithBody[fileRenameReques
 
 	if err := h.checkPermission(repoName, userEmail, filePath, permissions.Contributor); err != nil {
 		return fileResponse{}, permError(err)
+	}
+	if err := h.draftLockError(repoName, subfolder, oldName, userEmail); err != nil {
+		return fileResponse{}, err
 	}
 
 	if err := backend.MoveFile(subfolder, oldName, subfolder, body.Name); err != nil {
@@ -1495,6 +1571,9 @@ func (h *RepoRequesthandler) DeleteFolder(c fuego.ContextNoBody) (any, error) {
 	if err := h.checkPermission(repoName, userEmail, folderPath+"/", permissions.ContentManager); err != nil {
 		return nil, permError(err)
 	}
+	if err := h.draftLockErrorForFolder(repoName, folderPath, userEmail); err != nil {
+		return nil, err
+	}
 
 	if err := backend.DeleteFolder(folderPath); err != nil {
 		log.WithError(err).WithField("repo", repoName).WithField("folder", folderPath).Warn("failed to delete folder")
@@ -1544,6 +1623,9 @@ func (h *RepoRequesthandler) MoveFolder(c fuego.ContextWithBody[folderMoveReques
 	}
 	if err := h.checkPermission(repoName, userEmail, destParent+"/", permissions.Contributor); err != nil {
 		return folderResponse{}, permError(err)
+	}
+	if err := h.draftLockErrorForFolder(repoName, folderPath, userEmail); err != nil {
+		return folderResponse{}, err
 	}
 
 	if err := backend.RenameFolder(folderPath, newRelPath); err != nil {
@@ -1643,6 +1725,9 @@ func (h *RepoRequesthandler) SaveDraft(c fuego.ContextWithBody[draftRequest]) (f
 
 	if err := h.checkPermission(repoName, userEmail, filePath, permissions.Contributor); err != nil {
 		return fileResponse{}, permError(err)
+	}
+	if err := h.draftLockError(repoName, subfolder, filename, userEmail); err != nil {
+		return fileResponse{}, err
 	}
 
 	// Get the current commit hash as the base for future merge

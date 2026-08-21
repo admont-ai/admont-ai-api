@@ -62,6 +62,55 @@ func (m *Manager) DeleteDraft(subfolder, filename, email string) error {
 	return m.store.DeleteDraft(subfolder, filename, email)
 }
 
+// OtherUsersDraft returns metadata for another user's pending draft on
+// (subfolder, filename), or nil if none exists. callerEmail's own draft (if
+// any) is always excluded — a user is never locked out of their own draft.
+// If more than one other user has a draft (a legacy state from before
+// cross-user draft locking existed, since drafts were previously per-user
+// with no cross-user awareness), the most recently updated one is returned.
+func (m *Manager) OtherUsersDraft(subfolder, filename, callerEmail string) (*DraftMeta, error) {
+	owners, err := m.store.ListDraftOwners(subfolder, filename)
+	if err != nil {
+		return nil, err
+	}
+	return pickOtherUsersDraft(owners, callerEmail)
+}
+
+// OtherUsersDraftUnderFolder is the recursive form of OtherUsersDraft, used
+// for folder-level operations (delete_folder, move_folder) that would
+// orphan or invalidate any pending draft underneath the folder. Returns the
+// blocking draft's metadata and the repo-relative path of the file it
+// belongs to, or (nil, "", nil) if nothing under the folder blocks the
+// caller.
+func (m *Manager) OtherUsersDraftUnderFolder(folderPath, callerEmail string) (*DraftMeta, string, error) {
+	return m.store.OtherUsersDraftUnderFolder(folderPath, callerEmail)
+}
+
+// pickOtherUsersDraft excludes callerEmail (case-insensitive) from owners
+// and returns the most-recently-updated remaining entry, logging a warning
+// if more than one remains.
+func pickOtherUsersDraft(owners []*DraftMeta, callerEmail string) (*DraftMeta, error) {
+	var others []*DraftMeta
+	for _, o := range owners {
+		if !strings.EqualFold(o.UserEmail, callerEmail) {
+			others = append(others, o)
+		}
+	}
+	if len(others) == 0 {
+		return nil, nil
+	}
+	if len(others) > 1 {
+		log.WithField("file", others[0].OriginalFile).Warn("multiple other users have pending drafts on this file")
+	}
+	best := others[0]
+	for _, o := range others[1:] {
+		if o.UpdatedAt.After(best.UpdatedAt) {
+			best = o
+		}
+	}
+	return best, nil
+}
+
 // EnsureGitignore delegates to the store.
 func (m *Manager) EnsureGitignore() error {
 	return m.store.EnsureGitignore()
@@ -207,6 +256,96 @@ func (s *FilesystemStore) cleanEmptyDraftsDir(subfolder string) {
 		return
 	}
 	os.Remove(dir)
+}
+
+// ListDraftOwners returns metadata for every user with a pending draft on
+// (subfolder, filename), by matching draft filenames against the known
+// filename's prefix — unambiguous since filename is known here (unlike the
+// folder-recursive walk below, where filenames aren't known in advance).
+func (s *FilesystemStore) ListDraftOwners(subfolder, filename string) ([]*DraftMeta, error) {
+	entries, err := os.ReadDir(s.draftsDir(subfolder))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("listing drafts directory: %w", err)
+	}
+
+	prefix := "." + filename + ".draft."
+	var owners []*DraftMeta
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasPrefix(name, prefix) || strings.HasSuffix(name, ".meta") {
+			continue
+		}
+		email := strings.TrimPrefix(name, prefix)
+		meta, err := s.GetDraftMeta(subfolder, filename, email)
+		if err != nil {
+			log.WithError(err).WithField("file", name).Warn("failed to read draft meta while listing owners")
+			continue
+		}
+		owners = append(owners, meta)
+	}
+	return owners, nil
+}
+
+// OtherUsersDraftUnderFolder walks the subtree under folderPath looking for
+// any ".drafts" directory, reading each draft's ".meta" sidecar directly
+// (it already carries OriginalFile/UserEmail/UpdatedAt, sidestepping the
+// ambiguity of parsing an arbitrary draft filename back into
+// filename+email when both may themselves contain dots).
+func (s *FilesystemStore) OtherUsersDraftUnderFolder(folderPath, callerEmail string) (*DraftMeta, string, error) {
+	root := filepath.Join(s.repoPath, folderPath)
+	var found []*DraftMeta
+
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if !d.IsDir() || d.Name() != ".drafts" {
+			return nil
+		}
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			log.WithError(err).WithField("dir", path).Warn("failed to read drafts directory during folder scan")
+			return nil
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || !strings.HasSuffix(name, ".meta") {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(path, name))
+			if err != nil {
+				continue
+			}
+			var meta DraftMeta
+			if err := json.Unmarshal(data, &meta); err != nil {
+				continue
+			}
+			if !strings.EqualFold(meta.UserEmail, callerEmail) {
+				found = append(found, &meta)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("scanning folder for pending drafts: %w", err)
+	}
+
+	if len(found) == 0 {
+		return nil, "", nil
+	}
+	best := found[0]
+	for _, m := range found[1:] {
+		if m.UpdatedAt.After(best.UpdatedAt) {
+			best = m
+		}
+	}
+	return best, best.OriginalFile, nil
 }
 
 func (s *FilesystemStore) EnsureGitignore() error {

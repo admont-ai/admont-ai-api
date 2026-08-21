@@ -463,6 +463,7 @@ func main() {
 
 	agentHandler := requesthandler.NewAgentRequesthandler(llmClient, backendHolder, backends, repoConfigs, repoHandler.PermResolvers(), docPaths, searchIndexer)
 	agentHandler.SetConversationStore(db.Conversations, summarizer)
+	agentHandler.SetDraftManagers(draftManagers)
 
 	// Initialize search backend from existing provider (if any)
 	searchProviders, err := db.Search.ListSearchProviders(ctx)

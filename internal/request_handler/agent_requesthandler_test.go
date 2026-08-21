@@ -3,6 +3,7 @@ package requesthandler
 import (
 	"testing"
 
+	"github.com/christianfischer/md-wiki-server/internal/draft"
 	"github.com/christianfischer/md-wiki-server/internal/permissions"
 	"github.com/christianfischer/md-wiki-server/internal/repo"
 	"github.com/christianfischer/md-wiki-server/internal/repo/repotest"
@@ -167,4 +168,50 @@ func TestCheckPerm_NilResolverDenied(t *testing.T) {
 	err := h.checkPerm("wiki", "alice@example.com", "docs/page.md", permissions.Viewer)
 	require.Error(t, err)
 	assert.Equal(t, "permission denied", err.Error())
+}
+
+// --- toolWriteFile draft lock ---
+
+func contentManagerResolver() *permissions.Resolver {
+	return permissions.NewResolver(permissions.PermissionsFile{
+		Root:  &permissions.PathEntry{Default: permissions.ContentManager},
+		Paths: map[string]permissions.PathEntry{},
+	})
+}
+
+func TestToolWriteFile_Update_BlockedByOtherUsersDraft(t *testing.T) {
+	backend := repotest.NewFakeBackend().Seed("docs/page.md", []byte("old"))
+	h := agentHandlerWithBackend(backend, contentManagerResolver(), false)
+	dm := draft.NewManager(t.TempDir())
+	require.NoError(t, dm.SaveDraft("docs", "page.md", "bob@example.com", "Bob", "abc", []byte("bob's draft")))
+	h.draftManagers = map[string]*draft.Manager{"wiki": dm}
+
+	result := h.toolWriteFile("wiki", "alice@example.com", "Alice", "docs/page.md", "alice's edit", false)
+	assert.Contains(t, result, "error:")
+	assert.Contains(t, result, "bob@example.com")
+}
+
+func TestToolWriteFile_Create_NotBlockedByDrafts(t *testing.T) {
+	backend := repotest.NewFakeBackend()
+	h := agentHandlerWithBackend(backend, contentManagerResolver(), false)
+	dm := draft.NewManager(t.TempDir())
+	// A pending draft on a DIFFERENT (not-yet-created) file must not block
+	// creating this one — but even so, create only ever checks statErr, not
+	// drafts, since a brand-new file can't have a pre-existing draft.
+	h.draftManagers = map[string]*draft.Manager{"wiki": dm}
+
+	result := h.toolWriteFile("wiki", "alice@example.com", "Alice", "docs/new.md", "hello", true)
+	assert.Equal(t, "created docs/new.md (5 bytes)", result)
+}
+
+func TestToolWriteFile_Update_AdminBypassesLock(t *testing.T) {
+	backend := repotest.NewFakeBackend().Seed("docs/page.md", []byte("old"))
+	h := agentHandlerWithBackend(backend, contentManagerResolver(), false)
+	dm := draft.NewManager(t.TempDir())
+	require.NoError(t, dm.SaveDraft("docs", "page.md", "bob@example.com", "Bob", "abc", []byte("bob's draft")))
+	h.draftManagers = map[string]*draft.Manager{"wiki": dm}
+	h.isSystemAdmin = func(string) bool { return true }
+
+	result := h.toolWriteFile("wiki", "admin@example.com", "Admin", "docs/page.md", "admin edit", false)
+	assert.Equal(t, "updated docs/page.md (10 bytes)", result)
 }

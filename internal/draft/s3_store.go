@@ -183,5 +183,144 @@ func (s *S3Store) DeleteDraft(subfolder, filename, email string) error {
 	return nil
 }
 
+// draftsPrefix returns the key prefix under which every user's drafts for
+// this repo live (across all files) — {prefix}.drafts/.
+func (s *S3Store) draftsPrefix() string {
+	return strings.TrimSuffix(s.prefix, "/") + "/.drafts/"
+}
+
+// listDraftObjectKeys lists every object key under draftsPrefix(). The
+// email-hash segment comes before subfolder/filename in the key layout (see
+// draftKey), so there's no way to construct a narrower prefix for "drafts on
+// one file" or "drafts under one folder" — every call here scans the
+// repo's whole .drafts/ tree.
+func (s *S3Store) listDraftObjectKeys(ctx context.Context) ([]string, error) {
+	prefix := s.draftsPrefix()
+	var keys []string
+	paginator := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(s.bucket),
+		Prefix: aws.String(prefix),
+	})
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("s3 draft: list %q: %w", prefix, err)
+		}
+		for _, obj := range page.Contents {
+			keys = append(keys, strings.TrimPrefix(*obj.Key, prefix))
+		}
+	}
+	return keys, nil
+}
+
+// splitDraftKey parses a key already trimmed of draftsPrefix() — of the
+// form "{hash}/{subfolder...}/{draftFilename}" (or ".meta.json"-suffixed for
+// the sidecar) — into (subfolder, lastSegment, isMeta). The hash segment is
+// discarded; it only exists to shard by user and carries no information not
+// already in the draft filename / meta content.
+func splitDraftKey(trimmedKey string) (subfolder, lastSegment string, isMeta bool) {
+	parts := strings.Split(trimmedKey, "/")
+	if len(parts) < 2 {
+		return "", "", false
+	}
+	lastSegment = parts[len(parts)-1]
+	if strings.HasSuffix(lastSegment, ".meta.json") {
+		isMeta = true
+		lastSegment = strings.TrimSuffix(lastSegment, ".meta.json")
+	}
+	subfolder = strings.Join(parts[1:len(parts)-1], "/")
+	return subfolder, lastSegment, isMeta
+}
+
+// ListDraftOwners returns metadata for every user with a pending draft on
+// (subfolder, filename). filename is known here, so matching the draft
+// filename's prefix against it is unambiguous (unlike the folder-recursive
+// walk below, where filenames aren't known in advance).
+func (s *S3Store) ListDraftOwners(subfolder, filename string) ([]*DraftMeta, error) {
+	ctx := context.Background()
+	keys, err := s.listDraftObjectKeys(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	prefix := "." + filename + ".draft."
+	var owners []*DraftMeta
+	for _, k := range keys {
+		sf, last, isMeta := splitDraftKey(k)
+		if isMeta || sf != subfolder || !strings.HasPrefix(last, prefix) {
+			continue
+		}
+		email := strings.TrimPrefix(last, prefix)
+		meta, err := s.GetDraftMeta(subfolder, filename, email)
+		if err != nil {
+			log.WithError(err).WithField("key", k).Warn("failed to read draft meta while listing owners")
+			continue
+		}
+		owners = append(owners, meta)
+	}
+	return owners, nil
+}
+
+// OtherUsersDraftUnderFolder scans every draft under the repo (see
+// listDraftObjectKeys) and keeps the ".meta.json" sidecars whose
+// reconstructed subfolder falls under folderPath, reading each directly
+// (it already carries OriginalFile/UserEmail/UpdatedAt, sidestepping the
+// ambiguity of parsing an arbitrary draft filename back into
+// filename+email when both may themselves contain dots).
+func (s *S3Store) OtherUsersDraftUnderFolder(folderPath, callerEmail string) (*DraftMeta, string, error) {
+	ctx := context.Background()
+	keys, err := s.listDraftObjectKeys(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+
+	var found []*DraftMeta
+	for _, k := range keys {
+		sf, _, isMeta := splitDraftKey(k)
+		if !isMeta || !underFolder(sf, folderPath) {
+			continue
+		}
+		out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(s.bucket),
+			Key:    aws.String(s.draftsPrefix() + k),
+		})
+		if err != nil {
+			continue
+		}
+		data, err := io.ReadAll(out.Body)
+		out.Body.Close()
+		if err != nil {
+			continue
+		}
+		var meta DraftMeta
+		if err := json.Unmarshal(data, &meta); err != nil {
+			continue
+		}
+		if !strings.EqualFold(meta.UserEmail, callerEmail) {
+			found = append(found, &meta)
+		}
+	}
+
+	if len(found) == 0 {
+		return nil, "", nil
+	}
+	best := found[0]
+	for _, m := range found[1:] {
+		if m.UpdatedAt.After(best.UpdatedAt) {
+			best = m
+		}
+	}
+	return best, best.OriginalFile, nil
+}
+
+// underFolder reports whether subfolder is folderPath itself or nested
+// under it. folderPath == "" matches every subfolder (repo root).
+func underFolder(subfolder, folderPath string) bool {
+	if folderPath == "" {
+		return true
+	}
+	return subfolder == folderPath || strings.HasPrefix(subfolder, folderPath+"/")
+}
+
 // EnsureGitignore is a no-op for S3 stores.
 func (s *S3Store) EnsureGitignore() error { return nil }

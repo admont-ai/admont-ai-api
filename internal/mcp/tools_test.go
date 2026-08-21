@@ -476,6 +476,206 @@ func TestDeleteDraft_NoneExists(t *testing.T) {
 	assertToolError(t, res, "no draft found")
 }
 
+// --- cross-user draft visibility + write lock ---
+
+func TestGetFileInfo_ShowsOtherUsersPendingDraft(t *testing.T) {
+	backend := repotest.NewFakeBackend().Seed("docs/page.md", []byte("committed"))
+	s := newTestServer(t, backend, testServerOpts{publicAccess: true, resolver: resolverWithRoot(permissions.Viewer)})
+	require.NoError(t, s.draftManagers[testRepo].SaveDraft("docs", "page.md", "bob@example.com", "Bob", "abc", []byte("bob's draft")))
+	ctx := ctxWithIdentity("alice@example.com", "alice@example.com", "Alice")
+
+	res, err := s.getFileInfo(ctx, callReq(map[string]any{"repo": testRepo, "path": "docs/page.md"}))
+	require.NoError(t, err)
+	var resp map[string]any
+	require.NoError(t, jsonUnmarshal(resultText(t, res), &resp))
+	assert.Equal(t, "Bob", resp["pending_draft_owner_name"])
+	assert.Equal(t, "bob@example.com", resp["pending_draft_owner_email"])
+	assert.NotEmpty(t, resp["pending_draft_updated_at"])
+	assert.Equal(t, true, resp["locked_by_pending_draft"])
+	// The draft's content must never appear in this response.
+	assert.NotContains(t, resultText(t, res), "bob's draft")
+}
+
+func TestGetFileInfo_OwnDraft_NotShownAsLocked(t *testing.T) {
+	backend := repotest.NewFakeBackend().Seed("docs/page.md", []byte("committed"))
+	s := newTestServer(t, backend, testServerOpts{publicAccess: true, resolver: resolverWithRoot(permissions.Contributor)})
+	ctx := ctxWithIdentity("alice@example.com", "alice@example.com", "Alice")
+	require.NoError(t, s.draftManagers[testRepo].SaveDraft("docs", "page.md", "alice@example.com", "Alice", "abc", []byte("my draft")))
+
+	res, err := s.getFileInfo(ctx, callReq(map[string]any{"repo": testRepo, "path": "docs/page.md"}))
+	require.NoError(t, err)
+	var resp map[string]any
+	require.NoError(t, jsonUnmarshal(resultText(t, res), &resp))
+	assert.Equal(t, true, resp["is_draft"])
+	assert.Nil(t, resp["locked_by_pending_draft"])
+	assert.Nil(t, resp["pending_draft_owner_email"])
+}
+
+func TestGetFileInfo_AdminSeesDraftButNotLocked(t *testing.T) {
+	backend := repotest.NewFakeBackend().Seed("docs/page.md", []byte("committed"))
+	s := newTestServer(t, backend, testServerOpts{publicAccess: true, isAdmin: true})
+	require.NoError(t, s.draftManagers[testRepo].SaveDraft("docs", "page.md", "bob@example.com", "Bob", "abc", []byte("bob's draft")))
+	ctx := ctxWithIdentity("admin@example.com", "admin@example.com", "Admin")
+
+	res, err := s.getFileInfo(ctx, callReq(map[string]any{"repo": testRepo, "path": "docs/page.md"}))
+	require.NoError(t, err)
+	var resp map[string]any
+	require.NoError(t, jsonUnmarshal(resultText(t, res), &resp))
+	assert.Equal(t, "bob@example.com", resp["pending_draft_owner_email"])
+	assert.Equal(t, false, resp["locked_by_pending_draft"], "admin sees the draft exists but isn't locked out")
+}
+
+func TestUpdateFile_BlockedByOtherUsersDraft(t *testing.T) {
+	backend := repotest.NewFakeBackend().Seed("docs/page.md", []byte("committed"))
+	s := newTestServer(t, backend, testServerOpts{publicAccess: true, resolver: resolverWithRoot(permissions.ContentManager)})
+	require.NoError(t, s.draftManagers[testRepo].SaveDraft("docs", "page.md", "bob@example.com", "Bob", "abc", []byte("v1")))
+	ctx := ctxWithIdentity("alice@example.com", "alice@example.com", "Alice")
+
+	res, err := s.updateFile(ctx, callReq(map[string]any{"repo": testRepo, "path": "docs/page.md", "content": "alice's edit"}))
+	require.NoError(t, err)
+	assert.True(t, res.IsError)
+	assert.Contains(t, resultText(t, res), "bob@example.com")
+}
+
+func TestUpdateFile_OwnDraftDoesNotBlockSelf(t *testing.T) {
+	backend := repotest.NewFakeBackend().Seed("docs/page.md", []byte("committed"))
+	s := newTestServer(t, backend, testServerOpts{publicAccess: true, resolver: resolverWithRoot(permissions.ContentManager)})
+	require.NoError(t, s.draftManagers[testRepo].SaveDraft("docs", "page.md", "alice@example.com", "Alice", "abc", []byte("v1")))
+	ctx := ctxWithIdentity("alice@example.com", "alice@example.com", "Alice")
+
+	res, err := s.updateFile(ctx, callReq(map[string]any{"repo": testRepo, "path": "docs/page.md", "content": "alice's edit"}))
+	require.NoError(t, err)
+	assert.False(t, res.IsError, "expected success, got: %s", resultText(t, res))
+}
+
+func TestUpdateFile_AdminBypassesLock(t *testing.T) {
+	backend := repotest.NewFakeBackend().Seed("docs/page.md", []byte("committed"))
+	s := newTestServer(t, backend, testServerOpts{publicAccess: true, isAdmin: true})
+	require.NoError(t, s.draftManagers[testRepo].SaveDraft("docs", "page.md", "bob@example.com", "Bob", "abc", []byte("v1")))
+	ctx := ctxWithIdentity("admin@example.com", "admin@example.com", "Admin")
+
+	res, err := s.updateFile(ctx, callReq(map[string]any{"repo": testRepo, "path": "docs/page.md", "content": "admin edit"}))
+	require.NoError(t, err)
+	assert.False(t, res.IsError, "expected success, got: %s", resultText(t, res))
+}
+
+func TestDeleteFile_BlockedByOtherUsersDraft(t *testing.T) {
+	backend := repotest.NewFakeBackend().Seed("docs/page.md", []byte("committed"))
+	s := newTestServer(t, backend, testServerOpts{publicAccess: true, resolver: resolverWithRoot(permissions.ContentManager)})
+	require.NoError(t, s.draftManagers[testRepo].SaveDraft("docs", "page.md", "bob@example.com", "Bob", "abc", []byte("v1")))
+	ctx := ctxWithIdentity("alice@example.com", "alice@example.com", "Alice")
+
+	res, err := s.deleteFile(ctx, callReq(map[string]any{"repo": testRepo, "path": "docs/page.md"}))
+	require.NoError(t, err)
+	assert.True(t, res.IsError)
+	assert.Contains(t, resultText(t, res), "bob@example.com")
+}
+
+func TestDeleteFile_AdminBypassesLock(t *testing.T) {
+	backend := repotest.NewFakeBackend().Seed("docs/page.md", []byte("committed"))
+	s := newTestServer(t, backend, testServerOpts{publicAccess: true, isAdmin: true})
+	require.NoError(t, s.draftManagers[testRepo].SaveDraft("docs", "page.md", "bob@example.com", "Bob", "abc", []byte("v1")))
+	ctx := ctxWithIdentity("admin@example.com", "admin@example.com", "Admin")
+
+	res, err := s.deleteFile(ctx, callReq(map[string]any{"repo": testRepo, "path": "docs/page.md"}))
+	require.NoError(t, err)
+	assert.False(t, res.IsError, "expected success, got: %s", resultText(t, res))
+}
+
+func TestMoveFile_BlockedByOtherUsersDraft(t *testing.T) {
+	backend := repotest.NewFakeBackend().Seed("docs/page.md", []byte("committed"))
+	s := newTestServer(t, backend, testServerOpts{publicAccess: true, resolver: resolverWithRoot(permissions.ContentManager)})
+	require.NoError(t, s.draftManagers[testRepo].SaveDraft("docs", "page.md", "bob@example.com", "Bob", "abc", []byte("v1")))
+	ctx := ctxWithIdentity("alice@example.com", "alice@example.com", "Alice")
+
+	res, err := s.moveFile(ctx, callReq(map[string]any{"repo": testRepo, "path": "docs/page.md", "destination": "archive"}))
+	require.NoError(t, err)
+	assert.True(t, res.IsError)
+	assert.Contains(t, resultText(t, res), "bob@example.com")
+}
+
+func TestRenameFile_BlockedByOtherUsersDraft(t *testing.T) {
+	backend := repotest.NewFakeBackend().Seed("docs/page.md", []byte("committed"))
+	s := newTestServer(t, backend, testServerOpts{publicAccess: true, resolver: resolverWithRoot(permissions.ContentManager)})
+	require.NoError(t, s.draftManagers[testRepo].SaveDraft("docs", "page.md", "bob@example.com", "Bob", "abc", []byte("v1")))
+	ctx := ctxWithIdentity("alice@example.com", "alice@example.com", "Alice")
+
+	res, err := s.renameFile(ctx, callReq(map[string]any{"repo": testRepo, "path": "docs/page.md", "name": "renamed.md"}))
+	require.NoError(t, err)
+	assert.True(t, res.IsError)
+	assert.Contains(t, resultText(t, res), "bob@example.com")
+}
+
+func TestSaveDraft_BlockedWhenAnotherUserAlreadyHasDraft(t *testing.T) {
+	backend := repotest.NewFakeBackend().Seed("docs/page.md", []byte("committed"))
+	s := newTestServer(t, backend, testServerOpts{publicAccess: true, resolver: resolverWithRoot(permissions.Contributor)})
+	require.NoError(t, s.draftManagers[testRepo].SaveDraft("docs", "page.md", "bob@example.com", "Bob", "abc", []byte("v1")))
+	ctx := ctxWithIdentity("alice@example.com", "alice@example.com", "Alice")
+
+	res, err := s.saveDraft(ctx, callReq(map[string]any{"repo": testRepo, "path": "docs/page.md", "content": "alice's draft"}))
+	require.NoError(t, err)
+	assert.True(t, res.IsError)
+	assert.Contains(t, resultText(t, res), "bob@example.com")
+}
+
+func TestSaveDraft_OwnerCanUpdateOwnExistingDraft(t *testing.T) {
+	backend := repotest.NewFakeBackend().Seed("docs/page.md", []byte("committed"))
+	s := newTestServer(t, backend, testServerOpts{publicAccess: true, resolver: resolverWithRoot(permissions.Contributor)})
+	ctx := ctxWithIdentity("alice@example.com", "alice@example.com", "Alice")
+	require.NoError(t, s.draftManagers[testRepo].SaveDraft("docs", "page.md", "alice@example.com", "Alice", "abc", []byte("v1")))
+
+	res, err := s.saveDraft(ctx, callReq(map[string]any{"repo": testRepo, "path": "docs/page.md", "content": "alice's update"}))
+	require.NoError(t, err)
+	assert.False(t, res.IsError, "expected success, got: %s", resultText(t, res))
+}
+
+func TestDeleteFolder_BlockedByOtherUsersDraftInside(t *testing.T) {
+	backend := repotest.NewFakeBackend().Seed("docs/page.md", []byte("committed"))
+	s := newTestServer(t, backend, testServerOpts{publicAccess: true, resolver: resolverWithRoot(permissions.ContentManager)})
+	require.NoError(t, s.draftManagers[testRepo].SaveDraft("docs", "page.md", "bob@example.com", "Bob", "abc", []byte("v1")))
+	ctx := ctxWithIdentity("alice@example.com", "alice@example.com", "Alice")
+
+	res, err := s.deleteFolder(ctx, callReq(map[string]any{"repo": testRepo, "path": "docs"}))
+	require.NoError(t, err)
+	assert.True(t, res.IsError)
+	assert.Contains(t, resultText(t, res), "bob@example.com")
+}
+
+func TestDeleteFolder_AdminBypassesLock(t *testing.T) {
+	backend := repotest.NewFakeBackend().Seed("docs/page.md", []byte("committed"))
+	s := newTestServer(t, backend, testServerOpts{publicAccess: true, isAdmin: true})
+	require.NoError(t, s.draftManagers[testRepo].SaveDraft("docs", "page.md", "bob@example.com", "Bob", "abc", []byte("v1")))
+	ctx := ctxWithIdentity("admin@example.com", "admin@example.com", "Admin")
+
+	res, err := s.deleteFolder(ctx, callReq(map[string]any{"repo": testRepo, "path": "docs"}))
+	require.NoError(t, err)
+	assert.False(t, res.IsError, "expected success, got: %s", resultText(t, res))
+}
+
+func TestMoveFolder_BlockedByOtherUsersDraftInside(t *testing.T) {
+	backend := repotest.NewFakeBackend().Seed("docs/page.md", []byte("committed"))
+	s := newTestServer(t, backend, testServerOpts{publicAccess: true, resolver: resolverWithRoot(permissions.ContentManager)})
+	require.NoError(t, s.draftManagers[testRepo].SaveDraft("docs", "page.md", "bob@example.com", "Bob", "abc", []byte("v1")))
+	ctx := ctxWithIdentity("alice@example.com", "alice@example.com", "Alice")
+
+	res, err := s.moveFolder(ctx, callReq(map[string]any{"repo": testRepo, "path": "docs", "destination": "archive"}))
+	require.NoError(t, err)
+	assert.True(t, res.IsError)
+	assert.Contains(t, resultText(t, res), "bob@example.com")
+}
+
+func TestRenameFolder_BlockedByOtherUsersDraftInside(t *testing.T) {
+	backend := repotest.NewFakeBackend().Seed("docs/page.md", []byte("committed"))
+	s := newTestServer(t, backend, testServerOpts{publicAccess: true, resolver: resolverWithRoot(permissions.ContentManager)})
+	require.NoError(t, s.draftManagers[testRepo].SaveDraft("docs", "page.md", "bob@example.com", "Bob", "abc", []byte("v1")))
+	ctx := ctxWithIdentity("alice@example.com", "alice@example.com", "Alice")
+
+	res, err := s.renameFolder(ctx, callReq(map[string]any{"repo": testRepo, "path": "docs", "name": "documents"}))
+	require.NoError(t, err)
+	assert.True(t, res.IsError)
+	assert.Contains(t, resultText(t, res), "bob@example.com")
+}
+
 // --- search ---
 
 func TestSearch_NotEnabled(t *testing.T) {

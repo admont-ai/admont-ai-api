@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -193,6 +194,141 @@ func TestFilesystemStore_CleanEmptyDraftsDir(t *testing.T) {
 
 	_, err = os.Stat(draftsDir)
 	assert.True(t, os.IsNotExist(err), "empty .drafts dir should be cleaned up")
+}
+
+func TestFilesystemStore_ListDraftOwners_Empty(t *testing.T) {
+	dir := t.TempDir()
+	store := NewFilesystemStore(dir)
+
+	owners, err := store.ListDraftOwners("", "readme.md")
+	require.NoError(t, err)
+	assert.Empty(t, owners)
+}
+
+func TestFilesystemStore_ListDraftOwners_SingleOwner(t *testing.T) {
+	dir := t.TempDir()
+	store := NewFilesystemStore(dir)
+	require.NoError(t, store.SaveDraft("docs", "readme.md", "alice@example.com", "Alice", "abc", []byte("v1")))
+
+	owners, err := store.ListDraftOwners("docs", "readme.md")
+	require.NoError(t, err)
+	require.Len(t, owners, 1)
+	assert.Equal(t, "alice@example.com", owners[0].UserEmail)
+}
+
+func TestFilesystemStore_ListDraftOwners_MultipleOwners_ExcludesOtherFiles(t *testing.T) {
+	dir := t.TempDir()
+	store := NewFilesystemStore(dir)
+	require.NoError(t, store.SaveDraft("docs", "readme.md", "alice@example.com", "Alice", "abc", []byte("v1")))
+	require.NoError(t, store.SaveDraft("docs", "readme.md", "bob@example.com", "Bob", "abc", []byte("v2")))
+	require.NoError(t, store.SaveDraft("docs", "other.md", "carol@example.com", "Carol", "abc", []byte("v3")))
+
+	owners, err := store.ListDraftOwners("docs", "readme.md")
+	require.NoError(t, err)
+	require.Len(t, owners, 2)
+	emails := []string{owners[0].UserEmail, owners[1].UserEmail}
+	assert.ElementsMatch(t, []string{"alice@example.com", "bob@example.com"}, emails)
+}
+
+func TestFilesystemStore_ListDraftOwners_IgnoresMetaSidecars(t *testing.T) {
+	dir := t.TempDir()
+	store := NewFilesystemStore(dir)
+	require.NoError(t, store.SaveDraft("", "readme.md", "alice@example.com", "Alice", "abc", []byte("v1")))
+
+	owners, err := store.ListDraftOwners("", "readme.md")
+	require.NoError(t, err)
+	require.Len(t, owners, 1) // not 2 (draft + .meta counted separately)
+}
+
+func TestManager_OtherUsersDraft_NoDrafts(t *testing.T) {
+	mgr := NewManager(t.TempDir())
+	other, err := mgr.OtherUsersDraft("", "readme.md", "alice@example.com")
+	require.NoError(t, err)
+	assert.Nil(t, other)
+}
+
+func TestManager_OtherUsersDraft_OnlyCallersOwnDraft(t *testing.T) {
+	mgr := NewManager(t.TempDir())
+	require.NoError(t, mgr.SaveDraft("", "readme.md", "alice@example.com", "Alice", "abc", []byte("v1")))
+
+	// The critical regression: a user must never be locked out by their own draft.
+	other, err := mgr.OtherUsersDraft("", "readme.md", "alice@example.com")
+	require.NoError(t, err)
+	assert.Nil(t, other)
+}
+
+func TestManager_OtherUsersDraft_AnotherUsersDraft(t *testing.T) {
+	mgr := NewManager(t.TempDir())
+	require.NoError(t, mgr.SaveDraft("", "readme.md", "bob@example.com", "Bob", "abc", []byte("v1")))
+
+	other, err := mgr.OtherUsersDraft("", "readme.md", "alice@example.com")
+	require.NoError(t, err)
+	require.NotNil(t, other)
+	assert.Equal(t, "bob@example.com", other.UserEmail)
+}
+
+func TestManager_OtherUsersDraft_MultipleOthers_ReturnsMostRecentlyUpdated(t *testing.T) {
+	mgr := NewManager(t.TempDir())
+	require.NoError(t, mgr.SaveDraft("", "readme.md", "bob@example.com", "Bob", "abc", []byte("v1")))
+	time.Sleep(10 * time.Millisecond)
+	require.NoError(t, mgr.SaveDraft("", "readme.md", "carol@example.com", "Carol", "abc", []byte("v2")))
+
+	other, err := mgr.OtherUsersDraft("", "readme.md", "alice@example.com")
+	require.NoError(t, err)
+	require.NotNil(t, other)
+	assert.Equal(t, "carol@example.com", other.UserEmail)
+}
+
+func TestManager_OtherUsersDraft_CaseInsensitiveEmailMatch(t *testing.T) {
+	mgr := NewManager(t.TempDir())
+	require.NoError(t, mgr.SaveDraft("", "readme.md", "Alice@Example.com", "Alice", "abc", []byte("v1")))
+
+	other, err := mgr.OtherUsersDraft("", "readme.md", "alice@example.com")
+	require.NoError(t, err)
+	assert.Nil(t, other)
+}
+
+func TestManager_OtherUsersDraftUnderFolder_Empty(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "docs"), 0755))
+	mgr := NewManager(dir)
+
+	other, path, err := mgr.OtherUsersDraftUnderFolder("docs", "alice@example.com")
+	require.NoError(t, err)
+	assert.Nil(t, other)
+	assert.Empty(t, path)
+}
+
+func TestManager_OtherUsersDraftUnderFolder_NestedFile(t *testing.T) {
+	dir := t.TempDir()
+	mgr := NewManager(dir)
+	require.NoError(t, mgr.SaveDraft("docs/guides", "install.md", "bob@example.com", "Bob", "abc", []byte("v1")))
+
+	other, path, err := mgr.OtherUsersDraftUnderFolder("docs", "alice@example.com")
+	require.NoError(t, err)
+	require.NotNil(t, other)
+	assert.Equal(t, "bob@example.com", other.UserEmail)
+	assert.Equal(t, filepath.Join("docs/guides", "install.md"), path)
+}
+
+func TestManager_OtherUsersDraftUnderFolder_ExcludesCallersOwnDraft(t *testing.T) {
+	dir := t.TempDir()
+	mgr := NewManager(dir)
+	require.NoError(t, mgr.SaveDraft("docs", "install.md", "alice@example.com", "Alice", "abc", []byte("v1")))
+
+	other, _, err := mgr.OtherUsersDraftUnderFolder("docs", "alice@example.com")
+	require.NoError(t, err)
+	assert.Nil(t, other)
+}
+
+func TestManager_OtherUsersDraftUnderFolder_OutsideFolderNotMatched(t *testing.T) {
+	dir := t.TempDir()
+	mgr := NewManager(dir)
+	require.NoError(t, mgr.SaveDraft("other", "install.md", "bob@example.com", "Bob", "abc", []byte("v1")))
+
+	other, _, err := mgr.OtherUsersDraftUnderFolder("docs", "alice@example.com")
+	require.NoError(t, err)
+	assert.Nil(t, other)
 }
 
 func TestManager_DelegatesToStore(t *testing.T) {
