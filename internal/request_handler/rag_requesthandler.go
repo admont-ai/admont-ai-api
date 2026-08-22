@@ -1,6 +1,7 @@
 package requesthandler
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -298,9 +299,16 @@ func (h *RAGRequesthandler) RAG(c fuego.ContextWithBody[ragRequest]) (ragRespons
 			h.convStore.UpdateTitle(ctx, body.ConversationID, userEmail, title)
 		}
 
-		// Async summarization
+		// Async summarization. Detached from the request context (which is
+		// canceled the moment this handler returns) so the summarizer isn't
+		// killed before it can run, bounded by its own timeout instead.
 		if h.summarizer != nil {
-			go h.summarizer.MaybeSummarize(ctx, body.ConversationID, userEmail, body.Model)
+			convID, model := body.ConversationID, body.Model
+			go func() {
+				sumCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), summarizeTimeout)
+				defer cancel()
+				h.summarizer.MaybeSummarize(sumCtx, convID, userEmail, model)
+			}()
 		}
 	}
 

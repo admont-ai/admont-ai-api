@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/christianfischer/md-wiki-server/internal/draft"
 	"github.com/christianfischer/md-wiki-server/internal/llm"
@@ -30,6 +31,11 @@ const (
 	maxToolResultChars = 8_000
 	maxListEntries     = 500
 	agentSearchTopK    = 8
+
+	// summarizeTimeout bounds the background conversation-summarization
+	// goroutine, which runs detached from the request context (canceled the
+	// moment the handler returns) rather than inheriting its cancellation.
+	summarizeTimeout = 60 * time.Second
 )
 
 type agentRequest struct {
@@ -256,8 +262,16 @@ func (h *AgentRequesthandler) Agent(c fuego.ContextWithBody[agentRequest]) (agen
 			}
 			h.convStore.UpdateTitle(ctx, body.ConversationID, identity, title)
 		}
+		// Detached from the request context (which is canceled the moment
+		// this handler returns) so the summarizer isn't killed before it
+		// can run, bounded by its own timeout instead.
 		if h.summarizer != nil {
-			go h.summarizer.MaybeSummarize(ctx, body.ConversationID, identity, body.Model)
+			convID, model := body.ConversationID, body.Model
+			go func() {
+				sumCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), summarizeTimeout)
+				defer cancel()
+				h.summarizer.MaybeSummarize(sumCtx, convID, identity, model)
+			}()
 		}
 	}
 
