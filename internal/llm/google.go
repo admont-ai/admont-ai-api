@@ -56,6 +56,26 @@ func (f *GoogleFetcher) FetchModels(ctx context.Context) ([]Model, error) {
 
 var GoogleDefaultModel = Model{ID: "gemini-2.5-flash", Name: "Gemini 2.5 Flash"}
 
+// googleEmptyTextError builds an actionable error for the case where Gemini
+// returns no visible answer text. This most often happens when the
+// configured output-token limit is too small for a "thinking" model: the
+// entire budget gets consumed by invisible reasoning tokens before any
+// answer text is produced, and the API reports FinishReasonMaxTokens with a
+// non-empty token count but an empty Content.
+func googleEmptyTextError(resp *genai.GenerateContentResponse) error {
+	if len(resp.Candidates) > 0 {
+		switch resp.Candidates[0].FinishReason {
+		case genai.FinishReasonMaxTokens:
+			return fmt.Errorf("google response hit the output-token limit before producing any answer text (likely consumed by the model's internal reasoning) — raise the configured token limit for this action")
+		case "", genai.FinishReasonStop:
+			// Fall through to the generic error below.
+		default:
+			return fmt.Errorf("no text content in google response (finish reason: %s)", resp.Candidates[0].FinishReason)
+		}
+	}
+	return fmt.Errorf("no text content in google response")
+}
+
 type GoogleProvider struct {
 	client    *genai.Client
 	maxTokens int64
@@ -107,7 +127,7 @@ func (p *GoogleProvider) DoChat(ctx context.Context, model, systemPrompt string,
 		usage.OutputTokens = int64(resp.UsageMetadata.CandidatesTokenCount)
 	}
 	if resp.Text() == "" {
-		return "", usage, fmt.Errorf("no text content in google response")
+		return "", usage, googleEmptyTextError(resp)
 	}
 	return resp.Text(), usage, nil
 }
@@ -132,7 +152,7 @@ func (p *GoogleProvider) Do(ctx context.Context, model, systemPrompt, userPrompt
 	}
 
 	if resp.Text() == "" {
-		return "", usage, fmt.Errorf("no text content in google response")
+		return "", usage, googleEmptyTextError(resp)
 	}
 
 	return resp.Text(), usage, nil
