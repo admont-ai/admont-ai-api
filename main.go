@@ -1549,7 +1549,7 @@ func registerLLMProvider(client *llm.Client, registry *llm.ModelRegistry, cfg ll
 		registry.RegisterFetcher(provType, llm.NewOpenAICompatFetcher(provType, cfg.APIKey, "https://api.mistral.ai/v1"))
 	case "perplexity":
 		provider = llm.NewPerplexityProvider(cfg.APIKey, maxTokens)
-		registry.RegisterFetcher(provType, llm.NewOpenAICompatFetcher(provType, cfg.APIKey, "https://api.perplexity.ai"))
+		registry.RegisterFetcher(provType, llm.NewPerplexityFetcher())
 	case "xai":
 		provider = llm.NewXAIProvider(cfg.APIKey, maxTokens)
 		registry.RegisterFetcher(provType, llm.NewOpenAICompatFetcher(provType, cfg.APIKey, "https://api.x.ai/v1"))

@@ -9,6 +9,29 @@ import (
 
 var PerplexityDefaultModel = Model{ID: "sonar-pro", Name: "Sonar Pro"}
 
+// perplexityModels is a hardcoded list of Perplexity's Sonar model family.
+// Perplexity's API has no model-listing endpoint (GET /models returns 404 —
+// unlike every other OpenAI-compatible provider this codebase supports), so
+// dynamic fetching isn't possible; this list is maintained by hand instead.
+var perplexityModels = []Model{
+	{ID: "sonar", Name: "Sonar"},
+	{ID: "sonar-pro", Name: "Sonar Pro"},
+	{ID: "sonar-reasoning", Name: "Sonar Reasoning"},
+	{ID: "sonar-reasoning-pro", Name: "Sonar Reasoning Pro"},
+	{ID: "sonar-deep-research", Name: "Sonar Deep Research"},
+	{ID: "r1-1776", Name: "R1-1776 (offline, uncensored)"},
+}
+
+// PerplexityFetcher returns Perplexity's hardcoded model list. See
+// perplexityModels for why this can't be fetched dynamically.
+type PerplexityFetcher struct{}
+
+func NewPerplexityFetcher() *PerplexityFetcher { return &PerplexityFetcher{} }
+
+func (f *PerplexityFetcher) FetchModels(ctx context.Context) ([]Model, error) {
+	return perplexityModels, nil
+}
+
 type PerplexityProvider struct {
 	client    openai.Client
 	maxTokens int64
