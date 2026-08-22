@@ -187,6 +187,8 @@ func (h *AgentRequesthandler) Agent(c fuego.ContextWithBody[agentRequest]) (agen
 			log.WithError(err).Warn("agent LLM call failed")
 			return agentResponse{}, fuego.HTTPError{Detail: "LLM request failed: " + providerErrorMessage(err)}
 		}
+		log.WithFields(log.Fields{"repo": repoSlug, "model": body.Model, "iteration": i}).
+			Debug("agent LLM raw reply: " + truncateResult(reply))
 
 		directive, ok := parseAgentReply(reply)
 		if !ok {
