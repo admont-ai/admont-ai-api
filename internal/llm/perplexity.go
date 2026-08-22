@@ -22,14 +22,14 @@ const perplexityAgentURL = "https://api.perplexity.ai/v1/agent"
 // "preset" is the entire selection axis — so this list is maintained by
 // hand.
 var perplexityModels = []Model{
-	{ID: "fast", Name: "Fast"},
-	{ID: "low", Name: "Low"},
-	{ID: "medium", Name: "Medium"},
-	{ID: "high", Name: "High"},
-	{ID: "xhigh", Name: "Extra High"},
+	{ID: "fast", Name: "Perplexity Fast"},
+	{ID: "low", Name: "Perplexity Low"},
+	{ID: "medium", Name: "Perplexity Medium"},
+	{ID: "high", Name: "Perplexity High"},
+	{ID: "xhigh", Name: "Perplexity Extra High"},
 }
 
-var PerplexityDefaultModel = Model{ID: "low", Name: "Low"}
+var PerplexityDefaultModel = Model{ID: "low", Name: "Perplexity Low"}
 
 // PerplexityFetcher returns Perplexity's hardcoded preset list. See
 // perplexityModels for why this can't be fetched dynamically.
