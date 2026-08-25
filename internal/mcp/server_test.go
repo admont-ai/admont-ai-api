@@ -422,6 +422,69 @@ func TestOAuthToken_CorrectVerifierSucceedsAndIsSingleUse(t *testing.T) {
 	assert.Equal(t, 400, w2.Code)
 }
 
+func TestOAuthToken_AuthorizationCodeIncludesRefreshToken(t *testing.T) {
+	s, r := newRoutedTestServer(t)
+	verifier, challenge := pkcePair()
+	s.authCodes.Store("code1", &authCodeEntry{
+		JWT: "fake.jwt.token", RefreshJWT: "fake.refresh.token",
+		CodeChallenge: challenge, CodeChallengeMethod: "S256",
+		ExpiresAt: time.Now().Add(time.Minute),
+	})
+	form := url.Values{"grant_type": {"authorization_code"}, "code": {"code1"}, "code_verifier": {verifier}}
+
+	req := httptest.NewRequest("POST", "/mcp/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, 200, w.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "fake.refresh.token", resp["refresh_token"])
+}
+
+func TestOAuthToken_RefreshGrantIssuesNewTokens(t *testing.T) {
+	s, r := newRoutedTestServer(t)
+	refreshToken, err := s.jwtService.GenerateRefreshToken("user@example.com", "google")
+	require.NoError(t, err)
+
+	form := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refreshToken}}
+	req := httptest.NewRequest("POST", "/mcp/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, 200, w.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.NotEmpty(t, resp["access_token"])
+	assert.Equal(t, "Bearer", resp["token_type"])
+
+	claims, err := s.jwtService.ValidateToken(resp["access_token"].(string))
+	require.NoError(t, err)
+	assert.Equal(t, "user@example.com", claims.Email)
+	assert.Equal(t, "google", claims.Provider)
+}
+
+func TestOAuthToken_RefreshGrantRejectsInvalidToken(t *testing.T) {
+	_, r := newRoutedTestServer(t)
+	form := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {"not-a-real-token"}}
+	req := httptest.NewRequest("POST", "/mcp/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, 401, w.Code)
+}
+
+func TestOAuthToken_RefreshGrantRequiresToken(t *testing.T) {
+	_, r := newRoutedTestServer(t)
+	form := url.Values{"grant_type": {"refresh_token"}}
+	req := httptest.NewRequest("POST", "/mcp/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, 400, w.Code)
+}
+
 // --- sweep (cleanupLoop logic, driven synchronously) ---
 
 func TestSweep_RemovesExpiredCodesAndStates(t *testing.T) {

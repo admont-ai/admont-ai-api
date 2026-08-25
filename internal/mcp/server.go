@@ -116,6 +116,7 @@ type mcpAuthState struct {
 
 type authCodeEntry struct {
 	JWT                 string
+	RefreshJWT          string
 	CodeChallenge       string
 	CodeChallengeMethod string
 	ExpiresAt           time.Time
@@ -358,7 +359,7 @@ func (s *Server) oauthMetadata(c *gin.Context) {
 		"token_endpoint":                        s.baseURL + "/mcp/token",
 		"registration_endpoint":                 s.baseURL + "/mcp/register",
 		"response_types_supported":              []string{"code"},
-		"grant_types_supported":                 []string{"authorization_code"},
+		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
 		"code_challenge_methods_supported":      []string{"S256"},
 		"token_endpoint_auth_methods_supported": []string{"none"},
 	})
@@ -588,6 +589,12 @@ func (s *Server) issueMCPCode(c *gin.Context, redirectURI, clientState, codeChal
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
 		return
 	}
+	refreshJWT, err := s.jwtService.GenerateRefreshToken(email, provider)
+	if err != nil {
+		log.WithError(err).Error("MCP OAuth: failed to generate refresh token")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
+		return
+	}
 
 	codeBytes := make([]byte, 32)
 	if _, err := rand.Read(codeBytes); err != nil {
@@ -598,6 +605,7 @@ func (s *Server) issueMCPCode(c *gin.Context, redirectURI, clientState, codeChal
 
 	s.authCodes.Store(authCode, &authCodeEntry{
 		JWT:                 jwt,
+		RefreshJWT:          refreshJWT,
 		CodeChallenge:       codeChallenge,
 		CodeChallengeMethod: codeChallengeMethod,
 		ExpiresAt:           time.Now().Add(5 * time.Minute),
@@ -619,11 +627,17 @@ func (s *Server) issueMCPCode(c *gin.Context, redirectURI, clientState, codeChal
 
 func (s *Server) oauthToken(c *gin.Context) {
 	grantType := c.PostForm("grant_type")
-	if grantType != "authorization_code" {
+	switch grantType {
+	case "authorization_code":
+		s.oauthTokenFromCode(c)
+	case "refresh_token":
+		s.oauthTokenFromRefresh(c)
+	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported grant_type"})
-		return
 	}
+}
 
+func (s *Server) oauthTokenFromCode(c *gin.Context) {
 	code := c.PostForm("code")
 	codeVerifier := c.PostForm("code_verifier")
 	if code == "" {
@@ -658,7 +672,47 @@ func (s *Server) oauthToken(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"access_token": entry.JWT,
+		"access_token":  entry.JWT,
+		"refresh_token": entry.RefreshJWT,
+		"token_type":    "Bearer",
+		"expires_in":    3600,
+	})
+}
+
+// oauthTokenFromRefresh exchanges a refresh token for a new access token, so
+// MCP clients can silently renew an expired session instead of forcing the
+// user through the browser authorization flow again every time the
+// (short-lived) access token expires. Mirrors the web app's own
+// auth.Handler.Refresh: the refresh token itself is not rotated, so it's not
+// echoed back — the client keeps using the one it already has until it
+// expires on its own.
+func (s *Server) oauthTokenFromRefresh(c *gin.Context) {
+	refreshToken := c.PostForm("refresh_token")
+	if refreshToken == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "refresh_token is required"})
+		return
+	}
+
+	claims, err := s.jwtService.ValidateRefreshToken(refreshToken)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired refresh token"})
+		return
+	}
+
+	name := claims.Email
+	if claims.Identity != "" {
+		name = claims.Identity
+	}
+
+	jwt, err := s.jwtService.GenerateToken(claims.Email, name, "", claims.Provider)
+	if err != nil {
+		log.WithError(err).Error("MCP OAuth: failed to generate JWT from refresh")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"access_token": jwt,
 		"token_type":   "Bearer",
 		"expires_in":   3600,
 	})
