@@ -71,7 +71,7 @@ func errFromString(s string) error { return stringError(s) }
 
 func TestGenerateSystemPrompts(t *testing.T) {
 	// Every file type the UI offers must have a prompt, and the fallback must exist.
-	for _, ft := range []string{"markdown", "latex", "mermaid", "drawio", "text"} {
+	for _, ft := range []string{"markdown", "latex", "mermaid", "drawio", "excalidraw", "text"} {
 		assert.NotEmpty(t, generateSystemPrompts[ft], "missing system prompt for %s", ft)
 	}
 }

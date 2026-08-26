@@ -21,7 +21,7 @@ type llmRequest struct {
 	Content      string `json:"content,omitempty"`
 	Instructions string `json:"instructions,omitempty"`
 	// FileType selects the output format for the "generate" action:
-	// markdown (default), latex, mermaid, drawio, or text.
+	// markdown (default), latex, mermaid, drawio, excalidraw, or text.
 	FileType string `json:"file_type,omitempty"`
 }
 
@@ -40,6 +40,14 @@ var generateSystemPrompts = map[string]string{
 		"The output must be a single <mxfile> element containing a <diagram> element with an <mxGraphModel> whose <root> starts with the two required cells " +
 		"<mxCell id=\"0\"/> and <mxCell id=\"1\" parent=\"0\"/>, followed by the diagram's vertex and edge mxCell elements with sensible mxGeometry coordinates and sizes so the diagram is readable without overlaps. " +
 		"Output only the raw XML — no XML declaration is required, no code fences, no explanations.",
+	"excalidraw": "You are an Excalidraw diagram generator. Generate a complete, valid Excalidraw scene as a JSON object based on the user's request. " +
+		"The output must be a single JSON object with exactly these top-level fields: \"type\": \"excalidraw\", \"version\": 2, \"source\": \"https://excalidraw.com\", \"elements\": [...], \"appState\": {\"viewBackgroundColor\": \"#ffffff\"}, \"files\": {}. " +
+		"Each element in \"elements\" must be a well-formed Excalidraw element object with at minimum: a unique string \"id\", a \"type\" (one of rectangle, ellipse, diamond, arrow, line, text, freedraw), numeric \"x\", \"y\", \"width\", \"height\", \"angle\" (usually 0), " +
+		"\"strokeColor\", \"backgroundColor\", \"fillStyle\" (e.g. \"solid\"), \"strokeWidth\", \"strokeStyle\" (\"solid\"), \"roughness\" (1), \"opacity\" (100), \"groupIds\": [], \"seed\" and \"versionNonce\" (distinct random integers), \"version\": 1, \"isDeleted\": false, and \"boundElements\": null. " +
+		"For \"arrow\" and \"line\" elements, include a \"points\" array of [x, y] coordinate pairs relative to the element's own x/y. " +
+		"For \"text\" elements, include \"text\", \"fontSize\" (e.g. 20), \"fontFamily\" (1), \"textAlign\" (\"center\"), \"verticalAlign\" (\"middle\"), and if the text labels a shape, set \"containerId\" to that shape's id and add {\"id\": <text id>, \"type\": \"text\"} to that shape's \"boundElements\" array. " +
+		"Position elements with sensible, non-overlapping coordinates so the diagram is readable. " +
+		"Output only the raw JSON — no code fences, no explanations.",
 	"text": "You are a plain-text writer. Generate well-structured plain text based on the user's request. " +
 		"Do not use any markdown or other markup syntax. Output only the plain text — no code fences, no explanations.",
 }
@@ -186,7 +194,7 @@ func (h *LLMRequesthandler) HandleLLM(c fuego.ContextWithBody[llmRequest]) (llmR
 
 	case "polish":
 		// Generic edit with custom instructions (backward compatible).
-		// file_type selects diagram-aware editing for mermaid/drawio sources.
+		// file_type selects diagram-aware editing for mermaid/drawio/excalidraw sources.
 		if body.Content == "" {
 			return llmResponse{}, fuego.BadRequestError{Detail: "content is required for polish"}
 		}
@@ -201,6 +209,11 @@ func (h *LLMRequesthandler) HandleLLM(c fuego.ContextWithBody[llmRequest]) (llmR
 				"Preserve the parts of the diagram that are unrelated to the instructions. " +
 				"The result must remain a complete, valid, uncompressed draw.io XML document (<mxfile> with <diagram> and <mxGraphModel>, " +
 				"keeping the two required root cells) with sensible mxGeometry coordinates so the diagram stays readable — no code fences, no prose."
+		case "excalidraw":
+			task = "Modify the following Excalidraw diagram JSON according to the user's instructions. " +
+				"Preserve the parts of the diagram that are unrelated to the instructions, including the ids of elements that survive unchanged. " +
+				"The result must remain a complete, valid Excalidraw scene JSON object with the same top-level structure (\"type\", \"version\", \"source\", \"elements\", \"appState\", \"files\"), " +
+				"and every element must remain well-formed (id, type, x, y, width, height, angle, styling fields, groupIds, seed, versionNonce, version, isDeleted, boundElements, and points for arrows/lines) — no code fences, no prose."
 		}
 		return h.doEdit(ctx, body.Model, body.Content, task, body.Instructions)
 
