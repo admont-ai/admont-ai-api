@@ -304,7 +304,7 @@ After each tool call you receive a message starting with TOOL_RESULT containing 
 Rules:
 - Only work inside this repository; paths are relative (no leading slash, no "..").
 - Read a file before updating it, and preserve content unrelated to the request.
-- File conventions: .md = markdown documents, .mmd = Mermaid diagram source, .drawio = uncompressed draw.io XML, .csv = CSV.
+- File conventions: .md = markdown documents, .mmd = Mermaid diagram source, .drawio = uncompressed draw.io XML, .excalidraw = Excalidraw scene JSON, .csv = CSV.
 - Prefer few, purposeful tool calls. When the request is unclear, finish with an answer asking for clarification instead of guessing.`, repoSlug, scope)
 }
 
