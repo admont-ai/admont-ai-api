@@ -43,6 +43,41 @@ func TestCheckPermission_DotPathStillDeniedForNonAdmin(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// TestCheckPermission_AnonymousAllowedOnPublicRepoDespiteResolver locks in
+// the fix for a bug where a public repo's anonymous-read floor was only
+// honored when no permissions file existed at all; once any resolver was
+// present (as happens automatically once a repo has any owner entry),
+// PublicAccess was never consulted again and anonymous reads fell through to
+// the resolver's root default, which is commonly None.
+func TestCheckPermission_AnonymousAllowedOnPublicRepoDespiteResolver(t *testing.T) {
+	h := &RepoRequesthandler{
+		repoConfigs:   map[string]*git_repo.GitRepo{"wiki": {Name: "Wiki", PublicAccess: true}},
+		permResolvers: map[string]*permissions.Resolver{"wiki": resolverWithRoot(permissions.None)},
+	}
+
+	err := h.checkPermission("wiki", "", "docs/page.md", permissions.Viewer)
+	require.NoError(t, err)
+
+	// Writes must still require authentication even on a public repo.
+	err = h.checkPermission("wiki", "", "docs/page.md", permissions.Contributor)
+	require.Error(t, err)
+	assert.Equal(t, "authentication required", err.Error())
+}
+
+// TestCheckPermission_AnonymousDeniedOnPrivateRepoWithResolver confirms the
+// new public-floor branch doesn't leak into non-public repos: an anonymous
+// caller against a private repo with a resolver still gets denied.
+func TestCheckPermission_AnonymousDeniedOnPrivateRepoWithResolver(t *testing.T) {
+	h := &RepoRequesthandler{
+		repoConfigs:   map[string]*git_repo.GitRepo{"wiki": {Name: "Wiki", PublicAccess: false}},
+		permResolvers: map[string]*permissions.Resolver{"wiki": resolverWithRoot(permissions.None)},
+	}
+
+	err := h.checkPermission("wiki", "", "docs/page.md", permissions.Viewer)
+	require.Error(t, err)
+	assert.Equal(t, "authentication required", err.Error())
+}
+
 // --- draftLockError / draftLockErrorForFolder ---
 
 func handlerWithDraftManager(t *testing.T, isAdmin func(string) bool) (*RepoRequesthandler, *draft.Manager) {

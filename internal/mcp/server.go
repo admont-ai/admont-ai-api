@@ -727,11 +727,13 @@ func (s *Server) isReadOnly(repoSlug string) bool {
 
 // actionDeps builds the repoactions.Deps for one repo/identity pair.
 func (s *Server) actionDeps(repoSlug, identity string) repoactions.Deps {
+	rc := s.repoConfigs[repoSlug]
 	return repoactions.Deps{
 		Backend:         s.backends[repoSlug],
 		RepoSlug:        repoSlug,
 		Resolver:        s.permResolvers[repoSlug],
 		ReadOnly:        s.isReadOnly(repoSlug),
+		PublicAccess:    rc != nil && rc.PublicAccess,
 		IsAdmin:         identity != "" && s.isSystemAdmin != nil && s.isSystemAdmin(identity),
 		Indexer:         s.idx,
 		ShouldIndex:     s.shouldIndex(repoSlug),

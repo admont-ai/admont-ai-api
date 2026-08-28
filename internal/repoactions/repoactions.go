@@ -23,9 +23,10 @@ type Deps struct {
 	Backend  repo.RepoBackend
 	RepoSlug string
 
-	Resolver *permissions.Resolver // nil = no permissions file for this repo
-	ReadOnly bool
-	IsAdmin  bool // caller pre-resolves isSystemAdmin(identity)
+	Resolver     *permissions.Resolver // nil = no permissions file for this repo
+	ReadOnly     bool
+	PublicAccess bool // repo-level public_access flag; grants anonymous callers a Viewer floor
+	IsAdmin      bool // caller pre-resolves isSystemAdmin(identity)
 
 	Indexer     *indexer.Indexer // nil = indexing disabled
 	ShouldIndex bool
@@ -41,9 +42,10 @@ type Deps struct {
 // (internal/mcp/server.go's original checkPermission): the read-only gate
 // runs first (so even admins are blocked on a read-only repo), then the
 // admin bypass (which therefore CAN act on dot-paths), then the dot-path
-// denial, then resolver-based checks with an anonymous-viewer allowance when
-// no resolver exists and a distinct "authentication required" vs "not
-// found" error depending on whether identity is empty.
+// denial, then a public-repo anonymous-viewer floor that applies whether or
+// not a resolver exists, then resolver-based checks with an anonymous-viewer
+// allowance when no resolver exists and a distinct "authentication required"
+// vs "not found" error depending on whether identity is empty.
 func CheckPermission(d Deps, identity, path string, required permissions.Level) error {
 	if d.ReadOnly && required > permissions.Viewer {
 		return errors.New("not found")
@@ -53,6 +55,9 @@ func CheckPermission(d Deps, identity, path string, required permissions.Level) 
 	}
 	if IsDotPath(path) {
 		return errors.New("not found")
+	}
+	if identity == "" && required <= permissions.Viewer && d.PublicAccess {
+		return nil
 	}
 	if d.Resolver == nil {
 		if identity == "" && required <= permissions.Viewer {
@@ -78,7 +83,10 @@ func CheckPermission(d Deps, identity, path string, required permissions.Level) 
 // separately, in validatePath, before calling this), and a single
 // "permission denied" error rather than MCP's authentication/not-found
 // distinction. Deliberately NOT unified with CheckPermission — unifying
-// would silently change one caller's observable error behavior.
+// would silently change one caller's observable error behavior. It also
+// intentionally has no PublicAccess floor: its only caller sits behind
+// /conversations, which requires hard auth (middleware.JWTAuth), so it is
+// never invoked anonymously.
 func CheckPermSimple(d Deps, identity, path string, required permissions.Level) error {
 	if d.ReadOnly && required > permissions.Viewer {
 		return errors.New("repository is read-only")

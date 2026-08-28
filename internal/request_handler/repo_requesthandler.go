@@ -237,6 +237,11 @@ func (h *RepoRequesthandler) isReadOnly(repoSlug string) bool {
 	return ok && rc.ReadOnly
 }
 
+func (h *RepoRequesthandler) isPublicAccess(repoSlug string) bool {
+	rc, ok := h.repoConfigs[repoSlug]
+	return ok && rc.PublicAccess
+}
+
 // effectivePermissionLevel returns the effective permission level string for a user on a path.
 func (h *RepoRequesthandler) effectivePermissionLevel(repoSlug, userEmail, path string) string {
 	// System admins bypass permission checks (see checkPermission), so report
@@ -276,6 +281,14 @@ func (h *RepoRequesthandler) checkPermission(repoSlug, userEmail, path string, r
 	// Dotfiles and git internals are only accessible to repo admins
 	if isDotPath(path) {
 		return errNotFound
+	}
+
+	// Public repos grant anonymous callers a Viewer floor regardless of
+	// whether a permissions file exists — a resolver's path-level defaults
+	// can only escalate above this, never take it away, matching the
+	// resolver's own "permissions only escalate" semantics.
+	if userEmail == "" && required <= permissions.Viewer && h.isPublicAccess(repoSlug) {
+		return nil
 	}
 
 	resolver := h.permResolvers[repoSlug]
@@ -600,7 +613,8 @@ func (h *RepoRequesthandler) ListFiles(c fuego.ContextNoBody) (any, error) {
 		// Filter entries by read permission.
 		// Folders are shown if the user can read them directly OR if they contain accessible descendants.
 		resolver := h.permResolvers[repoName]
-		if resolver != nil {
+		anonPublicFloor := userEmail == "" && h.isPublicAccess(repoName)
+		if resolver != nil && !anonPublicFloor {
 			var filtered []repo.FileEntry
 			for _, e := range entries {
 				var entryPath string

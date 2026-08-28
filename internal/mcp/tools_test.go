@@ -254,6 +254,28 @@ func TestReadFile_ViewerAllowedContributorDenied(t *testing.T) {
 	assertToolError(t, res, "not found")
 }
 
+// TestReadFile_AnonymousAllowedOnPublicRepoDespiteResolver locks in the fix
+// for a bug where a public repo's anonymous-read floor was only honored when
+// no permissions file existed at all; once any resolver was present (as
+// happens automatically once a repo has any owner entry), PublicAccess was
+// never consulted again and anonymous reads fell through to the resolver's
+// root default, which is commonly None.
+func TestReadFile_AnonymousAllowedOnPublicRepoDespiteResolver(t *testing.T) {
+	backend := repotest.NewFakeBackend().Seed("docs/page.md", []byte("hi"))
+	resolver := resolverWithRoot(permissions.None)
+	s := newTestServer(t, backend, testServerOpts{publicAccess: true, resolver: resolver})
+	ctx := context.Background() // no identity set — anonymous caller
+
+	res, err := s.readFile(ctx, callReq(map[string]any{"repo": testRepo, "path": "docs/page.md"}))
+	require.NoError(t, err)
+	assert.Equal(t, "hi", resultText(t, res))
+
+	// Writes must still require authentication even on a public repo.
+	res, err = s.createFile(ctx, callReq(map[string]any{"repo": testRepo, "path": "docs/new.md", "content": "x"}))
+	require.NoError(t, err)
+	assertToolError(t, res, "authentication required")
+}
+
 func TestReadOnlyRepo_BlocksWritesEvenForAdmin(t *testing.T) {
 	backend := repotest.NewFakeBackend()
 	s := newTestServer(t, backend, testServerOpts{publicAccess: true, readOnly: true, isAdmin: true})
