@@ -551,12 +551,7 @@ func main() {
 	r.Use(ginLogrus())
 
 	r.Use(gzip.Gzip(gzip.DefaultCompression, gzip.WithExcludedPaths([]string{"/mcp/"})))
-	r.Use(cors.New(cors.Config{
-		AllowOrigins:     cfg.AllowedOrigins,
-		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
-		AllowCredentials: true,
-	}))
+	r.Use(cors.New(corsConfig(cfg.AllowedOrigins, publicURL)))
 	r.Use(func(c *gin.Context) {
 		c.Header("X-Content-Type-Options", "nosniff")
 		c.Header("X-Frame-Options", "DENY")
@@ -1616,4 +1611,22 @@ func buildPgvectorDSN(cfg map[string]string, fallbackDSN string) string {
 		sslmode = "require"
 	}
 	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", cfg["username"], cfg["password"], cfg["host"], port, cfg["database"], sslmode)
+}
+
+// corsConfig builds the CORS settings. Besides the configured cross-origin
+// UIs, it accepts the request's own public origin. gin-contrib/cors only
+// recognizes same-origin requests by comparing Origin with the raw Host
+// header, which is wrong when a proxy rewrites Host (e.g. Cloudflare/ALB in
+// front of a UI host that serves the API under /api). Same-origin requests
+// are not CORS requests and must not be rejected.
+func corsConfig(allowedOrigins []string, publicURL *publicurl.Resolver) cors.Config {
+	return cors.Config{
+		AllowOrigins: allowedOrigins,
+		AllowOriginWithContextFunc: func(c *gin.Context, origin string) bool {
+			return strings.EqualFold(origin, publicURL.Origin(c.Request))
+		},
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
+		AllowCredentials: true,
+	}
 }
