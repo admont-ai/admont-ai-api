@@ -110,9 +110,9 @@ Configuration is read from environment variables (a local `.env` is supported) o
 |---|---|---|
 | `JWT_SECRET` | _(empty)_ | Signing key for access/refresh tokens — set a strong value in production |
 | `ADMONT_ENCRYPTION_KEY` | _(empty)_ | 32-byte hex key for encrypting secrets at rest (recommended in production) |
-| `AUTH_BASE_URL` | _(empty)_ | Public base URL of this API, used for OAuth redirects and as the default passkey RP/origin |
+| `AUTH_BASE_URL` | _(empty)_ | Fixed public base URL of this API (e.g. `https://ui.example.com/api`), used for OAuth/MCP callback URLs and as the default passkey RP/origin. Leave empty to derive it per request from the Host header and, from `TRUSTED_PROXIES`, `X-Forwarded-Proto`/`-Host`/`-Prefix`, so one API can serve UIs on several hosts at `https://<ui-host>/api` |
 | `ALLOWED_ORIGINS` | `http://localhost:5173` | Comma-separated frontend origins (CORS + OAuth redirect allow-list) |
-| `TRUSTED_PROXIES` | _(none)_ | Comma-separated proxy CIDRs/IPs trusted for client-IP resolution (rate limiting) |
+| `TRUSTED_PROXIES` | _(none)_ | Comma-separated proxy CIDRs/IPs trusted for client-IP resolution (rate limiting) and, when `AUTH_BASE_URL` is empty, for deriving the public base URL from `X-Forwarded-*` headers |
 
 ### Signup & password policy
 

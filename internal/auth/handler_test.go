@@ -1,8 +1,11 @@
 package auth
 
 import (
+	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/christianfischer/md-wiki-server/internal/publicurl"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -31,9 +34,25 @@ func TestIsAllowedRedirect(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.allowed, h.isAllowedRedirect(tt.url))
+			assert.Equal(t, tt.allowed, h.isAllowedRedirect(nil, tt.url))
 		})
 	}
+}
+
+func TestIsAllowedRedirect_SameOrigin(t *testing.T) {
+	h := NewHandler(NewRegistry(), NewJWTService("secret", time.Hour), nil, nil, nil, "manual")
+	h.SetPublicURL(publicurl.New("", []string{"10.0.0.0/8"}))
+
+	req := httptest.NewRequest("GET", "/auth/login", nil)
+	req.RemoteAddr = "10.1.1.1:1234"
+	req.Host = "docs.example.com"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Forwarded-Prefix", "/api")
+
+	assert.True(t, h.isAllowedRedirect(req, "https://docs.example.com/auth/callback"))
+	assert.False(t, h.isAllowedRedirect(req, "http://docs.example.com/auth/callback"))
+	assert.False(t, h.isAllowedRedirect(req, "https://evil.example.com/x"))
+	assert.False(t, h.isAllowedRedirect(nil, "https://docs.example.com/x"))
 }
 
 func TestExchange_ValidCode(t *testing.T) {

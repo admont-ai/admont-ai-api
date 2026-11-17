@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/christianfischer/md-wiki-server/internal/publicurl"
 	"github.com/christianfischer/md-wiki-server/internal/store/users"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
@@ -32,7 +33,14 @@ type Handler struct {
 	onUserChange   func()
 	authCodes      sync.Map
 	webauthn       *WebAuthnManager
+	publicURL      *publicurl.Resolver
 }
+
+// SetPublicURL sets the resolver for the API's public base URL. With it, the
+// OAuth callback follows the host the login request came in on, and redirects
+// back to that same origin are allowed. Without it, the providers' configured
+// callback URLs and only allowedOrigins are used.
+func (h *Handler) SetPublicURL(r *publicurl.Resolver) { h.publicURL = r }
 
 // SetWebAuthn enables the passkey endpoints. When nil, they respond 501.
 func (h *Handler) SetWebAuthn(m *WebAuthnManager) { h.webauthn = m }
@@ -48,12 +56,16 @@ func NewHandler(registry *Registry, jwt *JWTService, allowedOrigins []string, au
 	}
 }
 
-func (h *Handler) isAllowedRedirect(rawURL string) bool {
+func (h *Handler) isAllowedRedirect(req *http.Request, rawURL string) bool {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return false
 	}
 	origin := strings.ToLower(u.Scheme + "://" + u.Host)
+	// Same origin as the request's public origin (UI and API on one host).
+	if h.publicURL != nil && req != nil && origin == strings.ToLower(h.publicURL.Origin(req)) {
+		return true
+	}
 	for _, allowed := range h.allowedOrigins {
 		ao, err := url.Parse(allowed)
 		if err != nil {
@@ -89,12 +101,16 @@ func (h *Handler) Login(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "redirect_uri is required"})
 		return
 	}
-	if !h.isAllowedRedirect(redirectURI) {
+	if !h.isAllowedRedirect(c.Request, redirectURI) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "redirect_uri origin not allowed"})
 		return
 	}
 
-	authURL, state, err := h.registry.GenerateAuthURL(provider, redirectURI)
+	callbackURL := ""
+	if h.publicURL != nil {
+		callbackURL = h.publicURL.BaseURL(c.Request) + "/auth/callback"
+	}
+	authURL, state, err := h.registry.GenerateAuthURLWithCallback(provider, redirectURI, callbackURL)
 	if err != nil {
 		log.WithError(err).Error("failed to generate auth URL")
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -147,7 +163,7 @@ func (h *Handler) Callback(c *gin.Context) {
 		return
 	}
 
-	if frontendRedirect != "" && h.isAllowedRedirect(frontendRedirect) {
+	if frontendRedirect != "" && h.isAllowedRedirect(c.Request, frontendRedirect) {
 		u, err := url.Parse(frontendRedirect)
 		if err == nil {
 			codeBytes := make([]byte, 32)
@@ -248,7 +264,7 @@ func (h *Handler) resolveExternalUser(ctx context.Context, provider, email, full
 // denyRedirect sends the browser back to an allow-listed frontend with an
 // ?error=<reason> param, or returns a 403 JSON error if no safe redirect exists.
 func (h *Handler) denyRedirect(c *gin.Context, frontendRedirect, reason string) {
-	if frontendRedirect != "" && h.isAllowedRedirect(frontendRedirect) {
+	if frontendRedirect != "" && h.isAllowedRedirect(c.Request, frontendRedirect) {
 		if u, err := url.Parse(frontendRedirect); err == nil {
 			q := u.Query()
 			q.Set("error", reason)

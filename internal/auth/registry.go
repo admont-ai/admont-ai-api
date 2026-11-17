@@ -26,7 +26,10 @@ type pkceState struct {
 	CodeVerifier     string
 	FrontendRedirect string
 	ProviderName     string
-	CreatedAt        time.Time
+	// CallbackURL is the OAuth redirect_uri used for this flow; empty means
+	// the provider's configured default. It must be reused for the exchange.
+	CallbackURL string
+	CreatedAt   time.Time
 }
 
 // Registry manages multiple OAuth providers with shared PKCE state.
@@ -72,8 +75,16 @@ func (r *Registry) Names() []string {
 	return names
 }
 
-// GenerateAuthURL generates an OAuth authorization URL for the given provider.
+// GenerateAuthURL generates an OAuth authorization URL for the given provider,
+// using the provider's configured callback URL.
 func (r *Registry) GenerateAuthURL(providerName, frontendRedirect string) (authURL, state string, err error) {
+	return r.GenerateAuthURLWithCallback(providerName, frontendRedirect, "")
+}
+
+// GenerateAuthURLWithCallback is GenerateAuthURL with an explicit OAuth
+// callback (redirect_uri), e.g. derived from the host the request came in on.
+// An empty callbackURL uses the provider's configured default.
+func (r *Registry) GenerateAuthURLWithCallback(providerName, frontendRedirect, callbackURL string) (authURL, state string, err error) {
 	r.mu.RLock()
 	entry, ok := r.providers[providerName]
 	r.mu.RUnlock()
@@ -100,10 +111,11 @@ func (r *Registry) GenerateAuthURL(providerName, frontendRedirect string) (authU
 		CodeVerifier:     codeVerifier,
 		FrontendRedirect: frontendRedirect,
 		ProviderName:     providerName,
+		CallbackURL:      callbackURL,
 		CreatedAt:        time.Now(),
 	})
 
-	authURL = entry.OAuthConfig.AuthCodeURL(state,
+	authURL = oauthConfigFor(entry, callbackURL).AuthCodeURL(state,
 		oauth2.SetAuthURLParam("code_challenge", codeChallenge),
 		oauth2.SetAuthURLParam("code_challenge_method", "S256"),
 	)
@@ -130,7 +142,7 @@ func (r *Registry) ExchangeAndValidate(ctx context.Context, state, code string) 
 		return nil, "", fmt.Errorf("provider %q not found", ps.ProviderName)
 	}
 
-	token, err := entry.OAuthConfig.Exchange(ctx, code, oauth2.SetAuthURLParam("code_verifier", ps.CodeVerifier))
+	token, err := oauthConfigFor(entry, ps.CallbackURL).Exchange(ctx, code, oauth2.SetAuthURLParam("code_verifier", ps.CodeVerifier))
 	if err != nil {
 		return nil, "", fmt.Errorf("exchanging code: %w", err)
 	}
@@ -245,4 +257,15 @@ func (r *Registry) cleanupLoop() {
 			return true
 		})
 	}
+}
+
+// oauthConfigFor returns the provider's OAuth config, with RedirectURL
+// overridden when callbackURL is set.
+func oauthConfigFor(entry *ProviderEntry, callbackURL string) *oauth2.Config {
+	if callbackURL == "" || callbackURL == entry.OAuthConfig.RedirectURL {
+		return entry.OAuthConfig
+	}
+	cfg := *entry.OAuthConfig
+	cfg.RedirectURL = callbackURL
+	return &cfg
 }

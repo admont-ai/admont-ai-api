@@ -19,6 +19,7 @@ import (
 	"github.com/christianfischer/md-wiki-server/internal/permissions"
 	"github.com/christianfischer/md-wiki-server/internal/pg_vector/backend"
 	"github.com/christianfischer/md-wiki-server/internal/pg_vector/indexer"
+	"github.com/christianfischer/md-wiki-server/internal/publicurl"
 	"github.com/christianfischer/md-wiki-server/internal/repo"
 	"github.com/christianfischer/md-wiki-server/internal/repoactions"
 	"github.com/christianfischer/md-wiki-server/internal/store/git_repo"
@@ -54,10 +55,9 @@ func getUserIdentity(ctx context.Context) string {
 
 // Server wraps the MCP protocol server and integrates with the wiki backend.
 type Server struct {
-	mcpServer                *mcpserver.MCPServer
-	sseServer                *mcpserver.SSEServer
-	streamableServer         *mcpserver.StreamableHTTPServer
-	protectedResourceHandler http.Handler
+	mcpServer        *mcpserver.MCPServer
+	sseServer        *mcpserver.SSEServer
+	streamableServer *mcpserver.StreamableHTTPServer
 
 	backends      map[string]repo.RepoBackend
 	draftManagers map[string]*draft.Manager
@@ -73,7 +73,9 @@ type Server struct {
 	jwtService *auth.JWTService
 	registry   *auth.Registry
 	authn      *auth.Authenticator
-	baseURL    string
+	// publicURL resolves the public base URL (scheme://host[/prefix]) per
+	// request, so OAuth metadata and callbacks follow the host the client used.
+	publicURL *publicurl.Resolver
 
 	// MCP OAuth: authorization codes and pending auth states
 	authCodes  sync.Map // code string → *authCodeEntry
@@ -143,7 +145,7 @@ func NewServer(
 		permResolvers: permResolvers,
 		jwtService:    jwtService,
 		registry:      registry,
-		baseURL:       strings.TrimRight(baseURL, "/"),
+		publicURL:     publicurl.New(baseURL, nil),
 	}
 
 	s.mcpServer = mcpserver.NewMCPServer(
@@ -155,8 +157,13 @@ func NewServer(
 	s.registerTools()
 
 	s.sseServer = mcpserver.NewSSEServer(s.mcpServer,
-		mcpserver.WithBaseURL(s.baseURL),
-		mcpserver.WithStaticBasePath("/mcp"),
+		// The message endpoint is sent to clients as a host-relative path
+		// that includes any proxy prefix (e.g. /api/mcp/message), so it
+		// resolves against whichever host the client connected to.
+		mcpserver.WithDynamicBasePath(func(r *http.Request, _ string) string {
+			return s.publicURL.Prefix(r) + "/mcp"
+		}),
+		mcpserver.WithUseFullURLForMessageEndpoint(false),
 		mcpserver.WithSSEEndpoint("/sse"),
 		mcpserver.WithMessageEndpoint("/message"),
 		mcpserver.WithSSEContextFunc(s.contextFromRequest),
@@ -173,12 +180,6 @@ func NewServer(
 		mcpserver.WithHTTPContextFunc(s.contextFromRequest),
 		mcpserver.WithStateLess(true),
 	)
-
-	s.protectedResourceHandler = mcpserver.NewProtectedResourceMetadataHandler(mcpserver.ProtectedResourceMetadataConfig{
-		Resource:               s.baseURL,
-		AuthorizationServers:   []string{s.baseURL},
-		BearerMethodsSupported: []string{"header"},
-	})
 
 	go s.cleanupLoop()
 
@@ -210,11 +211,32 @@ func (s *Server) SetRegisteredClientStore(cs RegisteredClientStore) {
 	s.clientStore = cs
 }
 
+// SetPublicURL sets the resolver for the public base URL. Without it, the base
+// URL passed to NewServer is used for every request.
+func (s *Server) SetPublicURL(r *publicurl.Resolver) {
+	if r != nil {
+		s.publicURL = r
+	}
+}
+
+func (s *Server) baseURL(c *gin.Context) string {
+	return s.publicURL.BaseURL(c.Request)
+}
+
+func (s *Server) protectedResourceMetadata(c *gin.Context) {
+	base := s.baseURL(c)
+	mcpserver.NewProtectedResourceMetadataHandler(mcpserver.ProtectedResourceMetadataConfig{
+		Resource:               base,
+		AuthorizationServers:   []string{base},
+		BearerMethodsSupported: []string{"header"},
+	}).ServeHTTP(c.Writer, c.Request)
+}
+
 // RegisterRoutes mounts all MCP-related routes on the Gin engine.
 func (s *Server) RegisterRoutes(r *gin.Engine) {
 	// OAuth discovery metadata
 	r.GET("/.well-known/oauth-authorization-server", s.oauthMetadata)
-	r.GET("/.well-known/oauth-protected-resource", gin.WrapH(s.protectedResourceHandler))
+	r.GET("/.well-known/oauth-protected-resource", s.protectedResourceMetadata)
 
 	mcp := r.Group("/mcp")
 	// OAuth endpoints
@@ -224,8 +246,8 @@ func (s *Server) RegisterRoutes(r *gin.Engine) {
 	mcp.GET("/callback", s.oauthCallback)
 	mcp.POST("/token", s.oauthToken)
 	// SSE transport (auth required — returns 401 to trigger MCP OAuth flow)
-	mcp.GET("/sse", s.requireAuth, gin.WrapF(s.sseServer.ServeHTTP))
-	mcp.POST("/message", s.requireAuthMessage, gin.WrapF(s.sseServer.ServeHTTP))
+	mcp.GET("/sse", s.requireAuth, gin.WrapH(s.sseServer.SSEHandler()))
+	mcp.POST("/message", s.requireAuthMessage, gin.WrapH(s.sseServer.MessageHandler()))
 	// Streamable HTTP transport (GET/POST/DELETE all on the same path).
 	mcp.Any("/", s.requireAuth, gin.WrapF(s.streamableServer.ServeHTTP))
 	mcp.Any("", s.requireAuth, gin.WrapF(s.streamableServer.ServeHTTP))
@@ -297,7 +319,7 @@ func (s *Server) requireAuth(c *gin.Context) {
 func (s *Server) sendUnauthorized(c *gin.Context) {
 	c.Header("WWW-Authenticate", fmt.Sprintf(
 		`Bearer resource_metadata="%s/.well-known/oauth-protected-resource"`,
-		s.baseURL,
+		s.baseURL(c),
 	))
 	c.AbortWithStatus(http.StatusUnauthorized)
 }
@@ -353,11 +375,12 @@ func (s *Server) ConnectedClients(identity string) []mcpClientSession {
 // --- OAuth Authorization Server for MCP Clients ---
 
 func (s *Server) oauthMetadata(c *gin.Context) {
+	base := s.baseURL(c)
 	c.JSON(http.StatusOK, gin.H{
-		"issuer":                                s.baseURL,
-		"authorization_endpoint":                s.baseURL + "/mcp/authorize",
-		"token_endpoint":                        s.baseURL + "/mcp/token",
-		"registration_endpoint":                 s.baseURL + "/mcp/register",
+		"issuer":                                base,
+		"authorization_endpoint":                base + "/mcp/authorize",
+		"token_endpoint":                        base + "/mcp/token",
+		"registration_endpoint":                 base + "/mcp/register",
 		"response_types_supported":              []string{"code"},
 		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
 		"code_challenge_methods_supported":      []string{"S256"},
@@ -498,7 +521,7 @@ func (s *Server) oauthAuthorize(c *gin.Context) {
 	}
 
 	// Start OAuth flow via registry (external IdP)
-	providerAuthURL, providerState, err := s.registry.GenerateAuthURL(provider, "")
+	providerAuthURL, providerState, err := s.registry.GenerateAuthURLWithCallback(provider, "", s.baseURL(c)+"/mcp/callback")
 	if err != nil {
 		log.WithError(err).Error("MCP: failed to generate auth URL")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to initiate authentication"})
@@ -535,7 +558,7 @@ func (s *Server) renderProviderChooser(c *gin.Context, _ mcpAuthParams, provider
 		if p == "internal" {
 			label = "Internal Account"
 		}
-		choices = append(choices, providerChoice{Href: "/mcp/authorize?" + q.Encode(), Label: label})
+		choices = append(choices, providerChoice{Href: "authorize?" + q.Encode(), Label: label})
 	}
 
 	c.Status(http.StatusOK)

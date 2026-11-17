@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/christianfischer/md-wiki-server/internal/auth"
 	"github.com/christianfischer/md-wiki-server/internal/draft"
 	"github.com/christianfischer/md-wiki-server/internal/permissions"
+	"github.com/christianfischer/md-wiki-server/internal/publicurl"
 	"github.com/christianfischer/md-wiki-server/internal/repo"
 	"github.com/christianfischer/md-wiki-server/internal/store/git_repo"
 	mcpclient "github.com/christianfischer/md-wiki-server/internal/store/mcp_client"
@@ -539,4 +541,75 @@ func TestConnectedClients_FiltersByIdentity(t *testing.T) {
 
 	all := s.ConnectedClients("")
 	assert.Len(t, all, 2)
+}
+
+// TestPublicURLDerivedPerRequest checks that, behind a trusted proxy serving the
+// API under a path prefix, OAuth metadata and the 401 challenge point back at
+// the host and prefix the client used.
+func TestPublicURLDerivedPerRequest(t *testing.T) {
+	s, r := newRoutedTestServer(t)
+	s.SetPublicURL(publicurl.New("", []string{"10.0.0.0/8"}))
+
+	proxied := func(method, path, host string) *http.Request {
+		req := httptest.NewRequest(method, path, nil)
+		req.RemoteAddr = "10.1.2.3:4567"
+		req.Host = host
+		req.Header.Set("X-Forwarded-Proto", "https")
+		req.Header.Set("X-Forwarded-Prefix", "/api")
+		return req
+	}
+
+	for _, host := range []string{"docs.example.com", "other.example.org"} {
+		base := "https://" + host + "/api"
+
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, proxied("GET", "/.well-known/oauth-authorization-server", host))
+		require.Equal(t, http.StatusOK, w.Code)
+		var meta map[string]any
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &meta))
+		assert.Equal(t, base, meta["issuer"])
+		assert.Equal(t, base+"/mcp/authorize", meta["authorization_endpoint"])
+		assert.Equal(t, base+"/mcp/token", meta["token_endpoint"])
+
+		w = httptest.NewRecorder()
+		r.ServeHTTP(w, proxied("GET", "/.well-known/oauth-protected-resource", host))
+		require.Equal(t, http.StatusOK, w.Code)
+		var prm map[string]any
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &prm))
+		assert.Equal(t, base, prm["resource"])
+
+		w = httptest.NewRecorder()
+		r.ServeHTTP(w, proxied("GET", "/mcp", host))
+		assert.Equal(t, http.StatusUnauthorized, w.Code)
+		assert.Contains(t, w.Header().Get("WWW-Authenticate"), base+"/.well-known/oauth-protected-resource")
+	}
+}
+
+// TestSSEEndpointEventIncludesProxyPrefix checks that the SSE transport tells
+// clients to post messages to the prefixed, host-relative path.
+func TestSSEEndpointEventIncludesProxyPrefix(t *testing.T) {
+	s, r := newRoutedTestServer(t)
+	s.SetPublicURL(publicurl.New("", []string{"127.0.0.1"}))
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	token, err := s.jwtService.GenerateToken("user@example.com", "User", "sub", "internal")
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", srv.URL+"/mcp/sse", nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Forwarded-Prefix", "/api")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	buf := make([]byte, 512)
+	n, _ := resp.Body.Read(buf)
+	body := string(buf[:n])
+	assert.Contains(t, body, "event: endpoint")
+	assert.Contains(t, body, "data: /api/mcp/message?sessionId=")
 }

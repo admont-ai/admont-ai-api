@@ -31,6 +31,7 @@ import (
 	pgvectorbackend "github.com/christianfischer/md-wiki-server/internal/pg_vector/backend/pgvector"
 	"github.com/christianfischer/md-wiki-server/internal/pg_vector/embedder"
 	"github.com/christianfischer/md-wiki-server/internal/pg_vector/indexer"
+	"github.com/christianfischer/md-wiki-server/internal/publicurl"
 	"github.com/christianfischer/md-wiki-server/internal/repo"
 	"github.com/christianfischer/md-wiki-server/internal/repo/repofactory"
 	"github.com/christianfischer/md-wiki-server/internal/repo/s3backend"
@@ -240,7 +241,20 @@ func main() {
 		log.WithField("base_url", baseURL).Info("auth_base_url derived from service config")
 	}
 
+	// Public base URL resolver. With AUTH_BASE_URL set, that fixed URL is used.
+	// Otherwise the base URL is derived per request (Host, plus
+	// X-Forwarded-Proto/-Host/-Prefix from TRUSTED_PROXIES), so one API can be
+	// served same-origin under several UI hosts, e.g. https://<ui-host>/api.
+	publicURL := publicurl.New(cfg.AuthBaseURL, cfg.TrustedProxies)
+	if publicURL.Static() {
+		log.WithField("base_url", cfg.AuthBaseURL).Info("public base URL: static (AUTH_BASE_URL)")
+	} else {
+		log.Info("public base URL: derived per request (AUTH_BASE_URL unset)")
+	}
+
 	// --- Load auth providers from DB ---
+	// These callback URLs are defaults; login flows override them per request
+	// via publicURL.
 	httpCallbackURL := baseURL + "/auth/callback"
 	mcpCallbackURL := baseURL + "/mcp/callback"
 
@@ -282,10 +296,20 @@ func main() {
 		authenticator.SetPasswordPolicy(cfg.InternalAuth.PasswordPolicy())
 	}
 	authHandler := auth.NewHandler(httpRegistry, jwtService, cfg.AllowedOrigins, authenticator, db.Users, cfg.ExternalAuth.SignupMode)
+	authHandler.SetPublicURL(publicURL)
 
 	// Passkey (WebAuthn) support for internal users. A user-verified passkey is
 	// multi-factor on its own, so a passkey login bypasses TOTP.
-	if authenticator != nil {
+	// Without AUTH_BASE_URL and WEBAUTHN_RP_ID, the relying party follows the
+	// request's public host.
+	if authenticator != nil && !publicURL.Static() && cfg.InternalAuth.WebAuthnRPID == "" {
+		if wm, err := auth.NewDynamicWebAuthnManager(db, "Admont", publicURL); err != nil {
+			log.WithError(err).Warn("failed to initialize passkey support — passkeys disabled")
+		} else {
+			authHandler.SetWebAuthn(wm)
+			log.Info("passkey (WebAuthn) support enabled (relying party derived per request host)")
+		}
+	} else if authenticator != nil {
 		rpID := cfg.InternalAuth.WebAuthnRPID
 		if rpID == "" {
 			if u, err := url.Parse(baseURL); err == nil {
@@ -633,6 +657,7 @@ func main() {
 			mcpRegistry,
 			baseURL,
 		)
+		mcpServer.SetPublicURL(publicURL)
 		mcpServer.SetSystemAdminCheck(adminHandler.CanManageRepos)
 		mcpServer.SetAuthenticator(authenticator)
 		mcpServer.SetIndexer(searchIndexer)

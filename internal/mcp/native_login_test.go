@@ -45,7 +45,7 @@ func TestRenderNativeLoginPage_HiddenFieldsAndForm(t *testing.T) {
 	})
 
 	body := w.Body.String()
-	assert.Contains(t, body, `action="/mcp/login"`)
+	assert.Contains(t, body, `action="login"`)
 	assert.Contains(t, body, `name="client_id" value="my-client"`)
 	assert.Contains(t, body, `name="state" value="state-value"`)
 	assert.Contains(t, body, `name="code_challenge" value="challenge-value"`)

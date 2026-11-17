@@ -16,7 +16,7 @@ func (h *Handler) WebAuthnLoginBegin(c *gin.Context) {
 		c.JSON(http.StatusNotImplemented, gin.H{"error": "passkeys are not enabled"})
 		return
 	}
-	options, sessionID, err := h.webauthn.BeginLogin()
+	options, sessionID, err := h.webauthn.BeginLogin(c.Request)
 	if err != nil {
 		log.WithError(err).Error("webauthn login begin failed")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
@@ -74,7 +74,7 @@ func (h *Handler) WebAuthnRegisterBegin(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
 		return
 	}
-	options, sessionID, err := h.webauthn.BeginRegistration(c.Request.Context(), email)
+	options, sessionID, err := h.webauthn.BeginRegistration(c.Request.Context(), email, c.Request)
 	if err != nil {
 		log.WithError(err).Error("webauthn register begin failed")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})

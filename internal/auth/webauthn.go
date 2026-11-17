@@ -10,8 +10,10 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/christianfischer/md-wiki-server/internal/publicurl"
 	"github.com/christianfischer/md-wiki-server/internal/store"
 	storeusers "github.com/christianfischer/md-wiki-server/internal/store/users"
 	"github.com/go-webauthn/webauthn/protocol"
@@ -25,22 +27,58 @@ const webauthnSessionTTL = 5 * time.Minute
 
 // WebAuthnManager wraps the go-webauthn relying party and the short-lived
 // ceremony state (challenges) shared between the begin and finish steps.
+//
+// With a static configuration (NewWebAuthnManager) one relying party is used.
+// With a dynamic one (NewDynamicWebAuthnManager) the relying party follows the
+// public host of each request (RP ID = host, origin = scheme://host), so the
+// API can serve UIs on several hosts. Passkeys are bound to the RP ID, so a
+// passkey registered on one host only works on that host.
 type WebAuthnManager struct {
-	wa       *webauthn.WebAuthn
+	wa       *webauthn.WebAuthn // static relying party; nil when dynamic
 	store    *store.Store
 	sessions sync.Map // sessionID -> *webauthnCeremony
+
+	displayName string
+	publicURL   *publicurl.Resolver
+	dynamic     sync.Map // origin -> *webauthn.WebAuthn
+	dynamicN    atomic.Int32
 }
+
+// maxDynamicRelyingParties caps the per-host relying-party cache.
+const maxDynamicRelyingParties = 64
 
 type webauthnCeremony struct {
 	data    *webauthn.SessionData
 	email   string // set for registration ceremonies; empty for discoverable login
 	expires time.Time
+	wa      *webauthn.WebAuthn // relying party the ceremony was started with
 }
 
 // NewWebAuthnManager builds a relying party for the given RP ID / origins.
 // Registration and login both require user verification, which is what lets a
 // passkey stand in for both authentication factors (so TOTP is skipped).
 func NewWebAuthnManager(st *store.Store, rpID, rpDisplayName string, origins []string) (*WebAuthnManager, error) {
+	wa, err := newRelyingParty(rpID, rpDisplayName, origins)
+	if err != nil {
+		return nil, err
+	}
+	m := &WebAuthnManager{wa: wa, store: st, displayName: rpDisplayName}
+	go m.cleanupLoop()
+	return m, nil
+}
+
+// NewDynamicWebAuthnManager builds a manager whose relying party is derived
+// from each request's public host via the resolver.
+func NewDynamicWebAuthnManager(st *store.Store, rpDisplayName string, resolver *publicurl.Resolver) (*WebAuthnManager, error) {
+	if resolver == nil {
+		return nil, errors.New("webauthn: public URL resolver required")
+	}
+	m := &WebAuthnManager{store: st, displayName: rpDisplayName, publicURL: resolver}
+	go m.cleanupLoop()
+	return m, nil
+}
+
+func newRelyingParty(rpID, rpDisplayName string, origins []string) (*webauthn.WebAuthn, error) {
 	wa, err := webauthn.New(&webauthn.Config{
 		RPID:          rpID,
 		RPDisplayName: rpDisplayName,
@@ -53,9 +91,32 @@ func NewWebAuthnManager(st *store.Store, rpID, rpDisplayName string, origins []s
 	if err != nil {
 		return nil, fmt.Errorf("configuring webauthn: %w", err)
 	}
-	m := &WebAuthnManager{wa: wa, store: st}
-	go m.cleanupLoop()
-	return m, nil
+	return wa, nil
+}
+
+// relyingParty returns the relying party for the request.
+func (m *WebAuthnManager) relyingParty(r *http.Request) (*webauthn.WebAuthn, error) {
+	if m.wa != nil {
+		return m.wa, nil
+	}
+	if r == nil {
+		return nil, errors.New("webauthn: request required to derive relying party")
+	}
+	origin := m.publicURL.Origin(r)
+	if v, ok := m.dynamic.Load(origin); ok {
+		return v.(*webauthn.WebAuthn), nil
+	}
+	wa, err := newRelyingParty(m.publicURL.Host(r), m.displayName, []string{origin})
+	if err != nil {
+		return nil, err
+	}
+	if m.dynamicN.Load() < maxDynamicRelyingParties {
+		if v, loaded := m.dynamic.LoadOrStore(origin, wa); loaded {
+			return v.(*webauthn.WebAuthn), nil
+		}
+		m.dynamicN.Add(1)
+	}
+	return wa, nil
 }
 
 // --- webauthn.User adapter ---
@@ -138,13 +199,13 @@ func credentialToStore(c *webauthn.Credential, name string) storeusers.WebAuthnC
 
 // --- ceremony session store ---
 
-func (m *WebAuthnManager) storeCeremony(data *webauthn.SessionData, email string) (string, error) {
+func (m *WebAuthnManager) storeCeremony(wa *webauthn.WebAuthn, data *webauthn.SessionData, email string) (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("generating session id: %w", err)
 	}
 	id := base64.RawURLEncoding.EncodeToString(b)
-	m.sessions.Store(id, &webauthnCeremony{data: data, email: email, expires: time.Now().Add(webauthnSessionTTL)})
+	m.sessions.Store(id, &webauthnCeremony{data: data, email: email, expires: time.Now().Add(webauthnSessionTTL), wa: wa})
 	return id, nil
 }
 
@@ -179,7 +240,11 @@ func (m *WebAuthnManager) cleanupLoop() {
 
 // BeginRegistration starts a passkey registration for the logged-in user and
 // returns the creation options plus an opaque ceremony session id.
-func (m *WebAuthnManager) BeginRegistration(ctx context.Context, email string) (*protocol.CredentialCreation, string, error) {
+func (m *WebAuthnManager) BeginRegistration(ctx context.Context, email string, r *http.Request) (*protocol.CredentialCreation, string, error) {
+	wa, err := m.relyingParty(r)
+	if err != nil {
+		return nil, "", err
+	}
 	entry, err := m.store.Users.GetInternalUser(ctx, email)
 	if err != nil {
 		return nil, "", err
@@ -191,14 +256,14 @@ func (m *WebAuthnManager) BeginRegistration(ctx context.Context, email string) (
 	if err != nil {
 		return nil, "", err
 	}
-	creation, session, err := m.wa.BeginRegistration(user,
+	creation, session, err := wa.BeginRegistration(user,
 		webauthn.WithResidentKeyRequirement(protocol.ResidentKeyRequirementRequired),
 		webauthn.WithExclusions(webauthn.Credentials(user.WebAuthnCredentials()).CredentialDescriptors()),
 	)
 	if err != nil {
 		return nil, "", fmt.Errorf("beginning registration: %w", err)
 	}
-	id, err := m.storeCeremony(session, email)
+	id, err := m.storeCeremony(wa, session, email)
 	if err != nil {
 		return nil, "", err
 	}
@@ -220,7 +285,7 @@ func (m *WebAuthnManager) FinishRegistration(ctx context.Context, sessionID, nam
 	if err != nil {
 		return err
 	}
-	credential, err := m.wa.FinishRegistration(user, *ceremony.data, r)
+	credential, err := ceremony.wa.FinishRegistration(user, *ceremony.data, r)
 	if err != nil {
 		return fmt.Errorf("verifying registration: %w", err)
 	}
@@ -234,12 +299,16 @@ func (m *WebAuthnManager) FinishRegistration(ctx context.Context, sessionID, nam
 
 // BeginLogin starts a discoverable passkey login and returns the assertion
 // options plus an opaque ceremony session id.
-func (m *WebAuthnManager) BeginLogin() (*protocol.CredentialAssertion, string, error) {
-	assertion, session, err := m.wa.BeginDiscoverableLogin(webauthn.WithUserVerification(protocol.VerificationRequired))
+func (m *WebAuthnManager) BeginLogin(r *http.Request) (*protocol.CredentialAssertion, string, error) {
+	wa, err := m.relyingParty(r)
+	if err != nil {
+		return nil, "", err
+	}
+	assertion, session, err := wa.BeginDiscoverableLogin(webauthn.WithUserVerification(protocol.VerificationRequired))
 	if err != nil {
 		return nil, "", fmt.Errorf("beginning login: %w", err)
 	}
-	id, err := m.storeCeremony(session, "")
+	id, err := m.storeCeremony(wa, session, "")
 	if err != nil {
 		return nil, "", err
 	}
@@ -272,7 +341,7 @@ func (m *WebAuthnManager) FinishLogin(ctx context.Context, sessionID string, r *
 		return m.buildUser(ctx, entry)
 	}
 
-	user, credential, err := m.wa.FinishPasskeyLogin(handler, *ceremony.data, r)
+	user, credential, err := ceremony.wa.FinishPasskeyLogin(handler, *ceremony.data, r)
 	if err != nil {
 		return "", fmt.Errorf("verifying login: %w", err)
 	}

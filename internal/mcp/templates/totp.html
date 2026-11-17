@@ -4,7 +4,7 @@
 <body><div class="card">
   <h1>Two-Factor Authentication</h1>
   {{template "error-block" .}}
-  <form method="POST" action="/mcp/login">
+  <form method="POST" action="login">
     {{template "hidden-fields" .}}
     <input type="hidden" name="step" value="totp">
     <input type="hidden" name="pending_token" value="{{.PendingToken}}">
