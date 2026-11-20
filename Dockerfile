@@ -33,9 +33,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git lfs install
 
 # Install ONNX Runtime shared library.
-# Note: use a version that publishes the CPU linux-x64 tarball
+# Must match the ORT C API version of github.com/yalue/onnxruntime_go in go.mod
+# (v1.26.0 -> onnxruntime 1.24.1). A mismatch fails at startup with
+# "Error setting ORT API base". Use a version that publishes the CPU linux-x64 tarball
 # (onnxruntime-linux-x64-<ver>.tgz). v1.21.1 only shipped GPU assets.
-ARG ONNX_VERSION=1.21.0
+ARG ONNX_VERSION=1.24.1
 RUN curl -fsSL https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_VERSION}/onnxruntime-linux-x64-${ONNX_VERSION}.tgz \
     | tar xz -C /tmp && \
     cp /tmp/onnxruntime-linux-x64-${ONNX_VERSION}/lib/libonnxruntime.so.${ONNX_VERSION} /usr/lib/ && \
