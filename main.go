@@ -1171,6 +1171,11 @@ func main() {
 		fuego.OptionTags("Folders"),
 		fuego.OptionSummary("Move a folder"),
 	)
+	fuegogin.Post(engine, repoWrite, "/move/*path", repoHandler.MoveAcrossRepos,
+		fuego.OptionTags("Files"),
+		fuego.OptionSummary("Move a file or folder to another repository"),
+		fuego.OptionDescription("Moves the item and commits both repositories immediately. Requires edit and delete permission on the source item and on the target folder."),
+	)
 
 	// Order routes
 	fuegogin.Put(engine, repoWrite, "/order/*path", repoHandler.SetOrder,
