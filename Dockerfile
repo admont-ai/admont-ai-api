@@ -24,6 +24,19 @@ RUN apk add --no-cache curl ca-certificates && \
     curl -fsSL -o /models/model.onnx "${MODEL_ONNX_URL}" && \
     curl -fsSL -o /models/vocab.txt "${VOCAB_URL}"
 
+# ---- ONNX Runtime stage ----
+# Must match the ORT C API version of github.com/yalue/onnxruntime_go in go.mod
+# (v1.19.0 -> onnxruntime 1.21.x); a mismatch fails at startup with
+# "Error setting ORT API base". Fetched from the official Microsoft NuGet
+# package because the GitHub release downloads started returning 404.
+FROM alpine:3.20 AS onnxruntime
+ARG ONNX_VERSION=1.21.0
+RUN apk add --no-cache curl ca-certificates unzip && \
+    curl -fsSL -o /tmp/ort.nupkg "https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime/${ONNX_VERSION}" && \
+    mkdir -p /onnxruntime && \
+    unzip -j /tmp/ort.nupkg runtimes/linux-x64/native/libonnxruntime.so -d /onnxruntime && \
+    rm /tmp/ort.nupkg
+
 # ---- Runtime stage ----
 FROM debian:bookworm-slim
 
@@ -32,18 +45,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/* && \
     git lfs install
 
-# Install ONNX Runtime shared library.
-# Must match the ORT C API version of github.com/yalue/onnxruntime_go in go.mod
-# (v1.19.0 -> onnxruntime 1.21.x; 1.24.x ships no CPU linux-x64 tarball). A mismatch fails at startup with
-# "Error setting ORT API base". Use a version that publishes the CPU linux-x64 tarball
-# (onnxruntime-linux-x64-<ver>.tgz). v1.21.1 only shipped GPU assets.
-ARG ONNX_VERSION=1.21.0
-RUN curl -fsSL https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_VERSION}/onnxruntime-linux-x64-${ONNX_VERSION}.tgz \
-    | tar xz -C /tmp && \
-    cp /tmp/onnxruntime-linux-x64-${ONNX_VERSION}/lib/libonnxruntime.so.${ONNX_VERSION} /usr/lib/ && \
-    ln -s /usr/lib/libonnxruntime.so.${ONNX_VERSION} /usr/lib/libonnxruntime.so && \
-    rm -rf /tmp/onnxruntime-*
-
+COPY --from=onnxruntime /onnxruntime/libonnxruntime.so /usr/lib/libonnxruntime.so
 COPY --from=build /bin/admont-ai-api /usr/local/bin/admont-ai-api
 COPY --from=model /models/model.onnx /models/model.onnx
 COPY --from=model /models/vocab.txt /models/vocab.txt
