@@ -29,7 +29,7 @@ require (
 	github.com/spf13/viper v1.21.0
 	github.com/stretchr/testify v1.11.1
 	github.com/xuri/excelize/v2 v2.10.1
-	github.com/yalue/onnxruntime_go v1.26.0
+	github.com/yalue/onnxruntime_go v1.19.0
 	github.com/yuin/goldmark v1.7.16
 	golang.org/x/oauth2 v0.35.0
 	google.golang.org/genai v1.49.0
